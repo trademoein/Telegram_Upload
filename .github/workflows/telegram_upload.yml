@@ -1,7 +1,7 @@
 name: تلگرام → گیت‌هاب (جلسه آپلود)
 
 on:
-  workflow_dispatch:   # فقط با کلیک دستی در GitHub Actions
+  workflow_dispatch:
 
 jobs:
   upload-session:
@@ -22,6 +22,6 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OWNER_ID: ${{ secrets.OWNER_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           REPO_NAME: ${{ github.repository }}
         run: python upload_session.py
