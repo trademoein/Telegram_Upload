@@ -6,22 +6,23 @@ import logging
 import json
 import math
 from datetime import datetime
-from pathlib import Path
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, (
-    Document, PhotoSize, Video, Audio, Voice, Animation, VideoNote, Sticker
-)
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    filters, ContextTypes
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
 from github import Github, Auth
 from github.GithubException import GithubException
 
-# ==================== تنظیمات از متغیرهای محیطی ====================
+# ==================== متغیرهای محیطی ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
 GH_TOKEN = os.getenv("GH_TOKEN")
-REPO_NAME = os.getenv("REPO_NAME")  # "owner/repo"
+REPO_NAME = os.getenv("REPO_NAME")
 
 # لاگینگ
 logging.basicConfig(
@@ -30,35 +31,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-logger.info("========== شروع جلسه ==========")
-logger.info(f"BOT_TOKEN: {BOT_TOKEN[:5] if BOT_TOKEN else None}...{BOT_TOKEN[-5:] if BOT_TOKEN else None}")
+logger.info("========== راه‌اندازی ربات ==========")
+logger.info(f"BOT_TOKEN: {BOT_TOKEN[:5] if BOT_TOKEN else 'None'}...{BOT_TOKEN[-5:] if BOT_TOKEN else ''}")
 logger.info(f"OWNER_ID: {OWNER_ID}")
-logger.info(f"GH_TOKEN: {GH_TOKEN[:5] if GH_TOKEN else None}...{GH_TOKEN[-5:] if GH_TOKEN else None}")
+logger.info(f"GH_TOKEN: {GH_TOKEN[:5] if GH_TOKEN else 'None'}...{GH_TOKEN[-5:] if GH_TOKEN else ''}")
 logger.info(f"REPO_NAME: {REPO_NAME}")
 
 if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
-# اتصال به گیت‌هاب (با Auth جدید)
+# ==================== اتصال به گیت‌هاب ====================
 auth = Auth.Token(GH_TOKEN)
 github = Github(auth=auth)
 try:
     repo = github.get_repo(REPO_NAME)
-    logger.info("✅ اتصال به گیت‌هاب موفق")
+    logger.info("✅ اتصال به گیت‌هاب موفقیت‌آمیز")
 except Exception as e:
-    logger.error(f"❌ خطا در اتصال: {e}")
+    logger.error(f"❌ خطا در اتصال به گیت‌هاب: {e}")
     raise
 
 # ==================== کلاس جلسه ====================
 class Session:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp(prefix="telegram_upload_")
-        self.files = []          # {"name": str, "size": int, "local_path": str, "caption": str}
+        self.files = []          # {"name", "size", "local_path", "caption"}
         self.status_message_id = None
         self.chat_id = None
 
 session = Session()
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN)  # تعریف اولیه bot برای استفاده در توابع
 
 # ==================== توابع کمکی ====================
 def get_file_size_str(size_bytes):
@@ -69,6 +70,7 @@ def get_file_size_str(size_bytes):
     return f"{size_bytes:.1f} TB"
 
 async def update_status_message():
+    """بروزرسانی پیام وضعیت با لیست فایل‌ها و دکمه‌ها"""
     if not session.status_message_id or not session.chat_id:
         return
     text = "📂 **لیست فایل‌های آماده آپلود**\n\n"
@@ -97,10 +99,11 @@ async def update_status_message():
         logger.error(f"خطا در بروزرسانی پیام: {e}")
 
 async def download_file(file_id, file_name):
+    """دانلود فایل از تلگرام"""
     local_path = os.path.join(session.temp_dir, file_name)
     file = await bot.get_file(file_id)
     await file.download_to_drive(local_path)
-    logger.info(f"دانلود شد: {file_name} ({os.path.getsize(local_path)} bytes)")
+    logger.info(f"✅ دانلود شد: {file_name} ({os.path.getsize(local_path)} bytes)")
     return local_path
 
 def split_file(file_path, chunk_size=95*1024*1024):
@@ -117,7 +120,7 @@ def split_file(file_path, chunk_size=95*1024*1024):
             with open(part_path, "wb") as pf:
                 pf.write(part_data)
             parts.append(part_path)
-            logger.info(f"قطعه {i+1}/{num_parts}: {part_name}")
+            logger.info(f"📦 قطعه {i+1}/{num_parts}: {part_name}")
     # فایل متادیتا
     manifest = {
         "original_name": base_name,
@@ -133,28 +136,25 @@ def split_file(file_path, chunk_size=95*1024*1024):
         json.dump(manifest, mf, indent=2)
     return parts, manifest_path
 
-async def upload_to_github(local_file_path, original_name, caption=None):
-    """آپلود فایل (کوچک مستقیم، بزرگ پارت بندی) در پوشه اختصاصی"""
-    # پوشه اختصاصی برای هر فایل: uploads/نام فایل (بدون پسوند)_زمان/
+async def upload_to_github(local_path, original_name, caption=""):
+    """آپلود فایل (کوچک مستقیم، بزرگ پارت‌بندی شده) در پوشه اختصاصی"""
     base_name = os.path.splitext(original_name)[0]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"uploads/{base_name}_{timestamp}/"
-    file_size = os.path.getsize(local_file_path)
+    file_size = os.path.getsize(local_path)
 
-    # اگر کپشن وجود دارد، یک فایل .caption.txt ذخیره کن
-    caption_text = caption or ""
-    caption_path = None
-    if caption_text.strip():
-        caption_path = os.path.join(os.path.dirname(local_file_path), f"{original_name}.caption.txt")
-        with open(caption_path, "w", encoding="utf-8") as cf:
-            cf.write(caption_text)
-        logger.info(f"کپشن ذخیره شد: {caption_path}")
+    # ذخیره کپشن در فایل جداگانه
+    if caption.strip():
+        caption_file = os.path.join(os.path.dirname(local_path), f"{original_name}.caption.txt")
+        with open(caption_file, "w", encoding="utf-8") as cf:
+            cf.write(caption)
 
     uploaded_urls = []
-    # آپلود فایل اصلی (یا قطعات)
+
     if file_size <= 100 * 1024 * 1024:
+        # فایل کوچک
         remote_path = f"{folder_name}{original_name}"
-        with open(local_file_path, "rb") as f:
+        with open(local_path, "rb") as f:
             content = f.read()
         try:
             contents = repo.get_contents(remote_path)
@@ -165,9 +165,10 @@ async def upload_to_github(local_file_path, original_name, caption=None):
             else:
                 raise
         uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_path}")
-        logger.info(f"آپلود شد (کوچک): {remote_path}")
+        logger.info(f"✅ آپلود شد (کوچک): {remote_path}")
     else:
-        parts, manifest_path = split_file(local_file_path)
+        # فایل بزرگ: تقسیم
+        parts, manifest_path = split_file(local_path)
         # آپلود قطعات
         for part_path in parts:
             part_name = os.path.basename(part_path)
@@ -176,51 +177,56 @@ async def upload_to_github(local_file_path, original_name, caption=None):
                 content = pf.read()
             repo.create_file(remote_part, f"Upload {part_name}", content, branch="main")
             uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
-            logger.info(f"آپلود قطعه: {remote_part}")
+            logger.info(f"✅ آپلود قطعه: {remote_part}")
         # آپلود manifest
         with open(manifest_path, "rb") as mf:
             manifest_content = mf.read()
         remote_manifest = f"{folder_name}{os.path.basename(manifest_path)}"
         repo.create_file(remote_manifest, "Upload manifest", manifest_content, branch="main")
         uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_manifest}")
-        logger.info(f"آپلود manifest: {remote_manifest}")
+        logger.info(f"✅ آپلود manifest: {remote_manifest}")
 
-    # آپلود فایل caption اگر وجود داشت
-    if caption_path:
-        with open(caption_path, "rb") as cf:
-            caption_content = cf.read()
+    # آپلود کپشن اگر وجود داشت
+    if caption.strip():
         remote_caption = f"{folder_name}{original_name}.caption.txt"
+        with open(caption_file, "rb") as cf:
+            caption_content = cf.read()
         repo.create_file(remote_caption, "Upload caption", caption_content, branch="main")
         uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_caption}")
-        logger.info(f"آپلود کپشن: {remote_caption}")
+        logger.info(f"✅ آپلود کپشن: {remote_caption}")
 
     return uploaded_urls
 
-# ==================== تابع کمکی برای دریافت فایل از انواع مختلف ====================
-async def get_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش هر نوع فایل (Document, Photo, Video, Audio, Voice, Animation, VideoNote, Sticker)"""
-    user_id = update.effective_user.id
-    logger.info(f"دریافت فایل از کاربر {user_id}")
-    if user_id != OWNER_ID:
-        await update.message.reply_text("⛔ شما اجازه آپلود ندارید.")
-        logger.warning(f"کاربر {user_id} بدون مجوز فایل فرستاد (OWNER_ID={OWNER_ID})")
+# ==================== هندلر اصلی برای دریافت هر نوع فایل ====================
+async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش هر نوع فایل (عکس، ویدیو، سند، صدا، استیکر و...)"""
+    user = update.effective_user
+    logger.info(f"📩 دریافت پیام از کاربر {user.id} (نام: {user.first_name})")
+
+    if user.id != OWNER_ID:
+        await update.message.reply_text("⛔ شما اجازه استفاده از این بات را ندارید.")
+        logger.warning(f"کاربر {user.id} بدون مجوز فایل فرستاد")
         return
 
     message = update.message
     caption = message.caption or ""
 
-    # تشخیص نوع فایل
+    # تشخیص نوع فایل و استخراج اطلاعات
     file_obj = None
     file_name = None
+
     if message.document:
         file_obj = message.document
-        file_name = file_obj.file_name
+        file_name = file_obj.file_name or f"document_{file_obj.file_unique_id}.bin"
+    elif message.photo:
+        file_obj = message.photo[-1]  # بزرگترین سایز
+        file_name = f"photo_{file_obj.file_unique_id}.jpg"
     elif message.video:
         file_obj = message.video
-        file_name = f"{file_obj.file_unique_id}.mp4"
+        file_name = file_obj.file_name or f"video_{file_obj.file_unique_id}.mp4"
     elif message.audio:
         file_obj = message.audio
-        file_name = file_obj.file_name or f"{file_obj.file_unique_id}.mp3"
+        file_name = file_obj.file_name or f"audio_{file_obj.file_unique_id}.mp3"
     elif message.voice:
         file_obj = message.voice
         file_name = f"voice_{file_obj.file_unique_id}.ogg"
@@ -233,10 +239,6 @@ async def get_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.sticker:
         file_obj = message.sticker
         file_name = f"sticker_{file_obj.file_unique_id}.webp"
-    elif message.photo:
-        # بزرگترین سایز عکس را بگیر
-        file_obj = message.photo[-1]
-        file_name = f"photo_{file_obj.file_unique_id}.jpg"
     else:
         await message.reply_text("❌ نوع فایل پشتیبانی نمی‌شود.")
         return
@@ -246,18 +248,16 @@ async def get_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_id = file_obj.file_id
     file_size = file_obj.file_size or 0
-    logger.info(f"نوع: {type(file_obj).__name__}, نام: {file_name}, حجم: {file_size}")
+    logger.info(f"📁 نوع: {type(file_obj).__name__}, نام: {file_name}, حجم: {file_size} bytes")
 
-    # محدودیت 2 گیگ (سقف API گیت‌هاب برای commit نیست، برای دانلود تلگرام)
     if file_size > 2 * 1024 * 1024 * 1024:
-        await message.reply_text("❌ حجم فایل بیش از ۲ گیگابایت است (محدودیت تلگرام برای دانلود).")
+        await message.reply_text("❌ حجم فایل بیش از ۲ گیگابایت است (محدودیت سرورهای تلگرام).")
         return
 
-    # دانلود
     try:
         local_path = await download_file(file_id, file_name)
     except Exception as e:
-        logger.error(f"خطا در دانلود: {e}")
+        logger.error(f"❌ خطا در دانلود: {e}")
         await message.reply_text(f"❌ خطا در دریافت فایل: {str(e)}")
         return
 
@@ -268,74 +268,54 @@ async def get_file_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": caption
     })
 
-    # ساختن پیام وضعیت اگر لازم باشد
     if not session.status_message_id:
         session.chat_id = update.effective_chat.id
-        msg = await message.reply_text("⚙️ در حال آماده‌سازی...")
-        session.status_message_id = msg.message_id
+        status_msg = await message.reply_text("⚙️ در حال آماده‌سازی...")
+        session.status_message_id = status_msg.message_id
         await update_status_message()
+        logger.info("✅ پیام وضعیت ساخته شد")
     else:
         await update_status_message()
 
     await message.delete()
-    logger.info(f"✅ فایل اضافه شد. تعداد کل: {len(session.files)}")
+    logger.info(f"✅ فایل {file_name} به لیست اضافه شد. تعداد کل: {len(session.files)}")
 
-# ==================== هندلرها ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("⛔ دسترسی ندارید.")
-        return
-    await update.message.reply_text(
-        "🚀 **ربات آپلودر به گیت‌هاب**\n\n"
-        "📌 **نحوه کار:**\n"
-        "• هر فایل (عکس، ویدیو، صدا، سند، استیکر و...) را ارسال کنید.\n"
-        "• کپشن فایل هم ذخیره می‌شود.\n"
-        "• فایل‌های بزرگ‌تر از ۱۰۰ مگابایت **به قطعات ۹۵ مگابایتی** تقسیم می‌شوند.\n"
-        "• برای هر فایل یک پوشه جداگانه در `uploads/` ساخته می‌شود.\n"
-        "• با دکمه‌های زیر می‌توانید لیست را مدیریت کنید.\n\n"
-        "⚠️ فقط خودتان اجازه دارید. پس از پایان، ربات خاموش می‌شود.",
-        parse_mode="Markdown"
-    )
-    logger.info(f"/start از OWNER_ID {OWNER_ID}")
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== هندلر دکمه‌ها ====================
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if update.effective_user.id != OWNER_ID:
+    user = update.effective_user
+
+    if user.id != OWNER_ID:
         await query.edit_message_text("شما مجاز نیستید.")
         return
 
     data = query.data
-    logger.info(f"دکمه: {data}")
+    logger.info(f"🔘 دکمه فشرده شد: {data}")
 
     if data == "upload":
         if not session.files:
-            await query.edit_message_text("هیچ فایلی برای آپلود نیست.")
+            await query.edit_message_text("هیچ فایلی برای آپلود وجود ندارد.")
             return
-        await query.edit_message_text("🔄 آپلود به گیت‌هاب... (زمان متغیر)")
-        all_results = []
+        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب... (ممکن است چند دقیقه طول بکشد)")
+        results = []
         for idx, f in enumerate(session.files, 1):
             try:
-                logger.info(f"آپلود {idx}/{len(session.files)}: {f['name']}")
+                logger.info(f"⬆️ شروع آپلود {idx}/{len(session.files)}: {f['name']}")
                 urls = await upload_to_github(f["local_path"], f["name"], f.get("caption", ""))
-                size_str = get_file_size_str(f['size'])
                 if len(urls) == 1:
-                    all_results.append(f"✅ {f['name']} ({size_str})\n   🔗 [دانلود]({urls[0]})")
+                    results.append(f"✅ {f['name']} → [دانلود]({urls[0]})")
                 else:
-                    # فایل بزرگ + manifest
-                    all_results.append(
-                        f"✅ {f['name']} ({size_str}) - به {len(urls)-1} قطعه تقسیم شد.\n"
-                        f"   📄 [manifest]({urls[-1]}) برای بازسازی"
-                    )
+                    results.append(f"✅ {f['name']} → به {len(urls)-1} قطعه تقسیم شد. [manifest]({urls[-1]})")
             except Exception as e:
-                logger.error(f"خطا در {f['name']}: {e}")
-                all_results.append(f"❌ {f['name']} → {str(e)}")
-        final = "**نتیجه آپلود:**\n\n" + "\n".join(all_results)
-        await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
+                logger.error(f"❌ خطا در {f['name']}: {e}")
+                results.append(f"❌ {f['name']} → {str(e)}")
+        final_text = "**نتیجه آپلود:**\n\n" + "\n".join(results)
+        await query.edit_message_text(final_text, parse_mode="Markdown", disable_web_page_preview=True)
         await finish_session()
 
     elif data == "cancel":
-        await query.edit_message_text("❌ لغو شد. جلسه پایان یافت.")
+        await query.edit_message_text("❌ عملیات لغو شد. جلسه خاتمه یافت.")
         await finish_session()
 
     elif data == "remove_last":
@@ -343,9 +323,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed = session.files.pop()
             try:
                 os.remove(removed["local_path"])
-                logger.info(f"حذف {removed['name']}")
-            except:
-                pass
+                logger.info(f"🗑 حذف شد: {removed['name']}")
+            except Exception as e:
+                logger.error(f"خطا در حذف: {e}")
             await update_status_message()
         else:
             await query.answer("لیست خالی است")
@@ -358,51 +338,74 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         session.files.clear()
         await update_status_message()
-        await query.answer("همه پاک شدند")
+        await query.answer("همه فایل‌ها پاک شدند")
+        logger.info("🧹 همه فایل‌ها پاک شدند")
 
+# ==================== دستور /start ====================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("⛔ شما دسترسی ندارید.")
+        return
+    await update.message.reply_text(
+        "🚀 **ربات آپلودر به گیت‌هاب**\n\n"
+        "📌 **نحوه کار:**\n"
+        "• هر فایلی (عکس، ویدیو، سند، صدا، استیکر، ویدئونوت و...) ارسال کنید.\n"
+        "• کپشن فایل هم ذخیره می‌شود.\n"
+        "• فایل‌های بزرگ >100MB به قطعات 95MB تقسیم می‌شوند.\n"
+        "• برای هر فایل یک پوشه جداگانه در `uploads/` ساخته می‌شود.\n"
+        "• با دکمه‌های زیر می‌توانید لیست را مدیریت کنید.\n\n"
+        "⚠️ فقط شما اجازه دارید. پس از آپلود یا لغو، ربات خاموش می‌شود.",
+        parse_mode="Markdown"
+    )
+    logger.info(f"📢 دستور /start از OWNER_ID {OWNER_ID}")
+
+# ==================== پایان جلسه و تایم‌اوت ====================
 async def finish_session():
-    logger.info("پایان جلسه - پاکسازی")
+    logger.info("🏁 پایان جلسه - پاکسازی فایل‌های موقت")
     shutil.rmtree(session.temp_dir, ignore_errors=True)
     if session.chat_id:
-        await bot.send_message(chat_id=session.chat_id, text="👋 جلسه پایان یافت. ربات خاموش می‌شود.")
-    await asyncio.sleep(1)
-    # خروج از برنامه (برای GitHub Actions)
+        try:
+            await bot.send_message(chat_id=session.chat_id, text="👋 جلسه پایان یافت. ربات خاموش می‌شود.")
+        except:
+            pass
+    # خروج از برنامه
     os._exit(0)
 
 async def idle_timeout():
     await asyncio.sleep(300)  # 5 دقیقه
-    logger.warning("تایم‌اوت 5 دقیقه - خاتمه جلسه")
+    logger.warning("⏰ تایم‌اوت 5 دقیقه - خاتمه جلسه")
     if session.chat_id:
-        await bot.send_message(chat_id=session.chat_id, text="⏰ عدم فعالیت به مدت ۵ دقیقه. جلسه خاتمه یافت.")
+        try:
+            await bot.send_message(chat_id=session.chat_id, text="⏰ عدم فعالیت به مدت ۵ دقیقه. جلسه خاتمه یافت.")
+        except:
+            pass
     await finish_session()
 
-# ==================== اصلی ====================
-def main():
+# ==================== تابع اصلی ====================
+async def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    # هندلر برای همه نوع فایل
-    file_handler = MessageHandler(
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE |
-        filters.Document.ALL | filters.ANIMATION | filters.VIDEO_NOTE | filters.Sticker.ALL,
-        get_file_info
-    )
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(file_handler)
+        filters.Document.ALL | filters.ANIMATION | filters.VIDEO_NOTE |
+        filters.Sticker.ALL,
+        handle_any_file
+    ))
+    app.add_handler(CallbackQueryHandler(button_callback))
 
-    # تایم اوت در پس‌زمینه
-    loop = asyncio.get_event_loop()
-    loop.create_task(idle_timeout())
+    # تایم‌اوت در پس‌زمینه
+    asyncio.create_task(idle_timeout())
 
-    # پیام خوشامدگویی خودکار به OWNER_ID
-    async def send_startup_message():
-        try:
-            await app.bot.send_message(chat_id=OWNER_ID, text="🤖 ربات آپلودر فعال شد.\nفایل ارسال کنید یا /start")
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام اولیه: {e}")
-    loop.create_task(send_startup_message())
+    # ارسال پیام روشن شدن ربات به OWNER_ID
+    try:
+        await app.bot.send_message(chat_id=OWNER_ID, text="🤖 ربات آپلودر فعال شد.\nفایل ارسال کنید یا /start را بزنید.")
+        logger.info("✅ پیام فعال شدن به OWNER_ID ارسال شد")
+    except Exception as e:
+        logger.error(f"❌ خطا در ارسال پیام فعال شدن: {e}")
 
-    logger.info("شروع polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🚀 شروع polling...")
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
