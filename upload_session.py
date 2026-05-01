@@ -24,13 +24,11 @@ OWNER_ID = os.getenv("OWNER_ID")
 GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")
 
-# تبدیل OWNER_ID به int (اگر None یا خالی باشد، خطا بده)
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
 except ValueError:
     OWNER_ID = 0
 
-# لاگینگ
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -43,14 +41,8 @@ logger.info(f"OWNER_ID: {OWNER_ID}")
 logger.info(f"GH_TOKEN: {GH_TOKEN[:5] if GH_TOKEN else 'Missing'}...")
 logger.info(f"REPO_NAME: {REPO_NAME}")
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is missing")
-if OWNER_ID == 0:
-    raise ValueError("OWNER_ID is missing or invalid")
-if not GH_TOKEN:
-    raise ValueError("GH_TOKEN is missing")
-if not REPO_NAME:
-    raise ValueError("REPO_NAME is missing")
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME]):
+    raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
 # ========== 3. اتصال به گیت‌هاب ==========
 try:
@@ -62,11 +54,11 @@ except Exception as e:
     logger.error(f"GitHub connection error: {e}")
     raise
 
-# ========== 4. کلاس جلسه ساده ==========
+# ========== 4. کلاس جلسه ==========
 class Session:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
-        self.files = []          # list of dicts
+        self.files = []
         self.status_msg_id = None
         self.chat_id = None
 
@@ -142,7 +134,6 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
     folder = f"uploads/{base}_{ts}/"
     size = os.path.getsize(local_path)
 
-    # save caption if any
     if caption_text.strip():
         cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
@@ -157,7 +148,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
         try:
             repo.create_file(remote, f"Upload {orig_name}", data, branch="main")
         except GithubException as e:
-            if e.status == 409:  # already exists -> update
+            if e.status == 409:
                 contents = repo.get_contents(remote)
                 repo.update_file(remote, f"Update {orig_name}", data, contents.sha, branch="main")
             else:
@@ -186,7 +177,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
 
     return urls
 
-# ========== 6. هندلرهای ربات ==========
+# ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     logger.info(f"/start from user {user_id}")
@@ -255,7 +246,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("File >2GB not supported (Telegram limit).")
         return
 
-    # download
     try:
         local_path = await download_file(file_id, fname)
     except Exception as e:
@@ -270,7 +260,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": caption
     })
 
-    # create status message if first file
     if not session.status_msg_id:
         session.chat_id = msg.chat_id
         status_msg = await msg.reply_text("⚙️ Preparing...")
@@ -279,7 +268,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update_status()
 
-    # delete original message to keep chat clean
     await msg.delete()
     logger.info(f"Added file {fname}. Total: {len(session.files)}")
 
@@ -359,7 +347,7 @@ async def idle_timeout():
             pass
     await finish()
 
-# ========== 7. اجرای اصلی ==========
+# ========== 7. اجرای اصلی با حلقه رویداد مقاوم ==========
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -371,10 +359,8 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # start idle timeout task
     asyncio.create_task(idle_timeout())
 
-    # notify owner that bot is running
     try:
         await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
         logger.info("Startup message sent to owner")
@@ -384,8 +370,15 @@ async def main():
     logger.info("Starting polling...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+def run():
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    except RuntimeError as e:
+        if "already running" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise
+
+if __name__ == "__main__":
+    run()
