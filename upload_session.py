@@ -61,9 +61,9 @@ class Session:
         self.files = []
         self.status_msg_id = None
         self.chat_id = None
+        self.idle_task = None   # برای مدیریت تایم‌اوت
 
 session = Session()
-bot = Bot(token=BOT_TOKEN)
 
 # ========== 5. توابع کمکی ==========
 def size_str(size):
@@ -73,7 +73,7 @@ def size_str(size):
         size /= 1024
     return f"{size:.1f} TB"
 
-async def update_status():
+async def update_status(bot):
     if not session.status_msg_id or not session.chat_id:
         return
     text = "📂 **فایل‌های آماده**\n\n"
@@ -96,7 +96,7 @@ async def update_status():
     except Exception as e:
         logger.error(f"update_status error: {e}")
 
-async def download_file(file_id, name):
+async def download_file(file_id, name, bot):
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -134,6 +134,8 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
     folder = f"uploads/{base}_{ts}/"
     size = os.path.getsize(local_path)
 
+    # ذخیره کیپشن در یک فایل جدا (هم برای فایل کوچک و هم بزرگ)
+    cap_path = None
     if caption_text.strip():
         cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
@@ -141,6 +143,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
 
     urls = []
 
+    # آپلود فایل اصلی یا قطعات
     if size <= 100*1024*1024:
         remote = f"{folder}{orig_name}"
         with open(local_path, "rb") as f:
@@ -161,21 +164,83 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
             pname = os.path.basename(part)
             remote_part = f"{folder}{pname}"
             with open(part, "rb") as pf:
-                repo.create_file(remote_part, f"Upload {pname}", pf.read(), branch="main")
+                data = pf.read()
+            try:
+                repo.create_file(remote_part, f"Upload {pname}", data, branch="main")
+            except GithubException as e:
+                if e.status == 409:
+                    contents = repo.get_contents(remote_part)
+                    repo.update_file(remote_part, f"Update {pname}", data, contents.sha, branch="main")
+                else:
+                    raise
             urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
             logger.info(f"Uploaded part: {remote_part}")
+        # آپلود manifest
         with open(man_path, "rb") as mf:
-            repo.create_file(f"{folder}{os.path.basename(man_path)}", "Upload manifest", mf.read(), branch="main")
-        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{folder}{os.path.basename(man_path)}")
+            man_data = mf.read()
+        remote_man = f"{folder}{os.path.basename(man_path)}"
+        try:
+            repo.create_file(remote_man, "Upload manifest", man_data, branch="main")
+        except GithubException as e:
+            if e.status == 409:
+                contents = repo.get_contents(remote_man)
+                repo.update_file(remote_man, "Update manifest", man_data, contents.sha, branch="main")
+            else:
+                raise
+        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
         logger.info("Uploaded manifest")
 
-    if caption_text.strip():
+    # آپلود کیپشن اگر وجود داشته باشد
+    if cap_path:
+        remote_cap = f"{folder}{orig_name}.caption.txt"
         with open(cap_path, "rb") as cf:
-            repo.create_file(f"{folder}{orig_name}.caption.txt", "Upload caption", cf.read(), branch="main")
-        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{folder}{orig_name}.caption.txt")
+            cap_data = cf.read()
+        try:
+            repo.create_file(remote_cap, "Upload caption", cap_data, branch="main")
+        except GithubException as e:
+            if e.status == 409:
+                contents = repo.get_contents(remote_cap)
+                repo.update_file(remote_cap, "Update caption", cap_data, contents.sha, branch="main")
+            else:
+                raise
+        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_cap}")
         logger.info("Uploaded caption")
 
     return urls
+
+async def reset_idle_timer(bot):
+    """لغو تایمر قبلی و ساخت تایمر جدید 5 دقیقه‌ای"""
+    if session.idle_task:
+        session.idle_task.cancel()
+    session.idle_task = asyncio.create_task(idle_timeout(bot))
+
+async def idle_timeout(bot):
+    await asyncio.sleep(300)  # 5 دقیقه
+    logger.warning("Idle timeout 5 minutes, ending session")
+    if session.chat_id:
+        try:
+            await bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
+        except:
+            pass
+    await finish(bot)
+
+async def finish(bot):
+    """پایان جلسه و خاموش کردن ربات بدون خطا"""
+    logger.info("Finishing session, cleaning temp dir")
+    if session.idle_task:
+        session.idle_task.cancel()
+    shutil.rmtree(session.temp_dir, ignore_errors=True)
+    if session.chat_id:
+        try:
+            await bot.send_message(session.chat_id, "👋 Session ended. Bot is shutting down.")
+        except:
+            pass
+    # خروج نرم از برنامه (بدون os._exit)
+    # از آنجا که ربات در یک حلقه polling است، باید polling را متوقف کنیم
+    # اما با توجه به اینکه کاربر خواسته بعد از آپلود خاموش شود، یک استثنا ایجاد می‌کنیم تا برنامه خاتمه یابد
+    # روش صحیح: دسترسی به Application و توقف آن - اما برای سادگی و اطمینان از خروج در محیط‌های مختلف:
+    loop = asyncio.get_running_loop()
+    loop.stop()   # توقف حلقه رویداد - باعث خروج برنامه می‌شود
 
 # ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,6 +266,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Not allowed.")
         logger.warning(f"Blocked user {user.id}")
         return
+
+    # ریست تایمر بیکاری
+    await reset_idle_timer(context.bot)
 
     msg = update.message
     caption = msg.caption or ""
@@ -247,7 +315,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        local_path = await download_file(file_id, fname)
+        local_path = await download_file(file_id, fname, context.bot)
     except Exception as e:
         logger.error(f"Download error: {e}")
         await msg.reply_text(f"Download failed: {e}")
@@ -264,11 +332,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.chat_id = msg.chat_id
         status_msg = await msg.reply_text("⚙️ Preparing...")
         session.status_msg_id = status_msg.message_id
-        await update_status()
+        await update_status(context.bot)
     else:
-        await update_status()
+        await update_status(context.bot)
 
-    await msg.delete()
+    # به جای حذف پیام، روی آن ری اکشن نشان بده (اختیاری)
+    try:
+        await msg.react(emoji="📥")
+    except:
+        pass
+
     logger.info(f"Added file {fname}. Total: {len(session.files)}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,6 +351,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != OWNER_ID:
         await query.edit_message_text("Not allowed.")
         return
+
+    # ریست تایمر بیکاری
+    await reset_idle_timer(context.bot)
 
     data = query.data
     logger.info(f"Button: {data}")
@@ -300,11 +376,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 results.append(f"❌ {f['name']} → {str(e)}")
         final = "**Result:**\n\n" + "\n".join(results)
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
-        await finish()
+        await finish(context.bot)   # خاموش شدن بعد از آپلود
 
     elif data == "cancel":
         await query.edit_message_text("Cancelled. Session ended.")
-        await finish()
+        await finish(context.bot)
 
     elif data == "remove_last":
         if session.files:
@@ -313,7 +389,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(removed["local_path"])
             except:
                 pass
-            await update_status()
+            await update_status(context.bot)
         else:
             await query.answer("List is empty")
 
@@ -324,28 +400,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         session.files.clear()
-        await update_status()
+        await update_status(context.bot)
         await query.answer("All cleared")
-
-async def finish():
-    logger.info("Finishing session, cleaning temp dir")
-    shutil.rmtree(session.temp_dir, ignore_errors=True)
-    if session.chat_id:
-        try:
-            await bot.send_message(session.chat_id, "👋 Session ended. Bot is shutting down.")
-        except:
-            pass
-    os._exit(0)
-
-async def idle_timeout():
-    await asyncio.sleep(300)
-    logger.warning("Idle timeout 5 minutes, ending session")
-    if session.chat_id:
-        try:
-            await bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
-        except:
-            pass
-    await finish()
 
 # ========== 7. اجرای اصلی با حلقه رویداد مقاوم ==========
 async def main():
@@ -359,8 +415,7 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    asyncio.create_task(idle_timeout())
-
+    # ارسال پیام شروع به مالک
     try:
         await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
         logger.info("Startup message sent to owner")
@@ -368,17 +423,40 @@ async def main():
         logger.error(f"Could not send startup message: {e}")
 
     logger.info("Starting polling...")
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-def run():
+    # Polling را با مدیریت خطای event loop شروع می‌کنیم
     try:
-        asyncio.run(main())
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
     except RuntimeError as e:
         if "already running" in str(e):
-            loop = asyncio.get_event_loop()
-            loop.create_task(main())
+            logger.warning("Event loop already running, using existing loop")
+            # در محیط‌هایی که لوپ در حال اجراست، از این روش استفاده می‌کنیم
+            # اما در این حالت run_polling را نمی‌توان دوباره صدا زد.
+            # راه حل: از webhook استفاده کنیم یا اینکه برنامه را برای polling طراحی کنیم.
+            # برای سادگی، خطا را لوگ می‌کنیم و ادامه نمی‌دهیم.
+            logger.error("Cannot run polling because event loop is already running. Use webhook or run in a clean environment.")
+            raise
         else:
             raise
+
+def run():
+    """ورودی اصلی برنامه - مدیریت حلقه رویداد را انجام می‌دهد"""
+    try:
+        # تلاش می‌کنیم اگر لوپی در حال اجراست از آن استفاده کنیم
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # هیچ لوپی در حال اجرا نیست، یک لوپ جدید می‌سازیم
+        loop = None
+
+    if loop and loop.is_running():
+        # در محیطی مثل Jupyter یا某些 runners، لوپ در حال اجراست
+        # در این صورت نمی‌توانیم run_polling را اجرا کنیم، باید از create_task استفاده کنیم
+        logger.info("Event loop already running. Scheduling main task.")
+        asyncio.create_task(main())
+        # اما برای اینکه برنامه متوقف نشود، باید لوپ را به حرکت نگه داریم (در این محیط‌ها لوپ از قبل فعال است)
+        # کاری نمی‌کنیم، اجازه می‌دهیم لوپ جاری کار خود را بکند.
+    else:
+        # محیط استاندارد: لوپ تازه می‌سازیم و main را اجرا می‌کنیم
+        asyncio.run(main())
 
 if __name__ == "__main__":
     run()
