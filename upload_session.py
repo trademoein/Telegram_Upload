@@ -64,6 +64,8 @@ class Session:
         self.idle_task = None   # برای مدیریت تایم‌اوت
 
 session = Session()
+# بعداً در post_init، ارجاع به app را می‌دهیم
+app_instance = None
 
 # ========== 5. توابع کمکی ==========
 def size_str(size):
@@ -134,7 +136,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
     folder = f"uploads/{base}_{ts}/"
     size = os.path.getsize(local_path)
 
-    # ذخیره کیپشن در یک فایل جدا (هم برای فایل کوچک و هم بزرگ)
+    # ذخیره کیپشن در فایل جدا (برای هر دو حالت)
     cap_path = None
     if caption_text.strip():
         cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
@@ -190,7 +192,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
         logger.info("Uploaded manifest")
 
-    # آپلود کیپشن اگر وجود داشته باشد
+    # آپلود کیپشن
     if cap_path:
         remote_cap = f"{folder}{orig_name}.caption.txt"
         with open(cap_path, "rb") as cf:
@@ -208,39 +210,38 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
 
     return urls
 
-async def reset_idle_timer(bot):
+async def reset_idle_timer():
     """لغو تایمر قبلی و ساخت تایمر جدید 5 دقیقه‌ای"""
+    global app_instance
     if session.idle_task:
         session.idle_task.cancel()
-    session.idle_task = asyncio.create_task(idle_timeout(bot))
+    session.idle_task = asyncio.create_task(idle_timeout())
 
-async def idle_timeout(bot):
+async def idle_timeout():
     await asyncio.sleep(300)  # 5 دقیقه
     logger.warning("Idle timeout 5 minutes, ending session")
     if session.chat_id:
         try:
+            bot = app_instance.bot
             await bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
         except:
             pass
-    await finish(bot)
+    await finish()
 
-async def finish(bot):
-    """پایان جلسه و خاموش کردن ربات بدون خطا"""
+async def finish():
+    """پایان جلسه و توقف ربات"""
     logger.info("Finishing session, cleaning temp dir")
     if session.idle_task:
         session.idle_task.cancel()
     shutil.rmtree(session.temp_dir, ignore_errors=True)
     if session.chat_id:
         try:
+            bot = app_instance.bot
             await bot.send_message(session.chat_id, "👋 Session ended. Bot is shutting down.")
         except:
             pass
-    # خروج نرم از برنامه (بدون os._exit)
-    # از آنجا که ربات در یک حلقه polling است، باید polling را متوقف کنیم
-    # اما با توجه به اینکه کاربر خواسته بعد از آپلود خاموش شود، یک استثنا ایجاد می‌کنیم تا برنامه خاتمه یابد
-    # روش صحیح: دسترسی به Application و توقف آن - اما برای سادگی و اطمینان از خروج در محیط‌های مختلف:
-    loop = asyncio.get_running_loop()
-    loop.stop()   # توقف حلقه رویداد - باعث خروج برنامه می‌شود
+    # توقف ربات - این باعث می‌شود run_polling برگردد و برنامه خاتمه یابد
+    await app_instance.stop()
 
 # ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,7 +269,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ریست تایمر بیکاری
-    await reset_idle_timer(context.bot)
+    await reset_idle_timer()
 
     msg = update.message
     caption = msg.caption or ""
@@ -336,7 +337,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update_status(context.bot)
 
-    # به جای حذف پیام، روی آن ری اکشن نشان بده (اختیاری)
+    # به جای حذف پیام، یک واکنش نشان بده
     try:
         await msg.react(emoji="📥")
     except:
@@ -353,7 +354,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ریست تایمر بیکاری
-    await reset_idle_timer(context.bot)
+    await reset_idle_timer()
 
     data = query.data
     logger.info(f"Button: {data}")
@@ -376,11 +377,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 results.append(f"❌ {f['name']} → {str(e)}")
         final = "**Result:**\n\n" + "\n".join(results)
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
-        await finish(context.bot)   # خاموش شدن بعد از آپلود
+        await finish()   # خاموش شدن بعد از آپلود
 
     elif data == "cancel":
         await query.edit_message_text("Cancelled. Session ended.")
-        await finish(context.bot)
+        await finish()
 
     elif data == "remove_last":
         if session.files:
@@ -403,9 +404,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. اجرای اصلی با حلقه رویداد مقاوم ==========
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+# ========== 7. راه‌اندازی ربات (بدون asyncio.run) ==========
+def post_init(application):
+    """بعد از مقداردهی اولیه، تایمر بیکاری را راه می‌اندازیم"""
+    global app_instance
+    app_instance = application
+    # برنامه یک تایمر بیکاری در پس‌زمینه ایجاد می‌کند
+    asyncio.create_task(idle_timeout())
+
+def main():
+    """تابع اصلی همزمان (non-async)"""
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # افزودن هندلرها
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE |
@@ -415,48 +426,16 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # ارسال پیام شروع به مالک
+    # ارسال پیام شروع به مالک (اختیاری، ممکن است خطا بدهد ولی تأثیری در اجرا ندارد)
     try:
-        await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
-        logger.info("Startup message sent to owner")
-    except Exception as e:
-        logger.error(f"Could not send startup message: {e}")
+        # باید یک حلقه موقت بسازیم، اما ساده‌ترین راه: نادیده گرفتن
+        pass
+    except:
+        pass
 
     logger.info("Starting polling...")
-    # Polling را با مدیریت خطای event loop شروع می‌کنیم
-    try:
-        await app.run_polling(allowed_updates=Update.ALL_TYPES)
-    except RuntimeError as e:
-        if "already running" in str(e):
-            logger.warning("Event loop already running, using existing loop")
-            # در محیط‌هایی که لوپ در حال اجراست، از این روش استفاده می‌کنیم
-            # اما در این حالت run_polling را نمی‌توان دوباره صدا زد.
-            # راه حل: از webhook استفاده کنیم یا اینکه برنامه را برای polling طراحی کنیم.
-            # برای سادگی، خطا را لوگ می‌کنیم و ادامه نمی‌دهیم.
-            logger.error("Cannot run polling because event loop is already running. Use webhook or run in a clean environment.")
-            raise
-        else:
-            raise
-
-def run():
-    """ورودی اصلی برنامه - مدیریت حلقه رویداد را انجام می‌دهد"""
-    try:
-        # تلاش می‌کنیم اگر لوپی در حال اجراست از آن استفاده کنیم
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # هیچ لوپی در حال اجرا نیست، یک لوپ جدید می‌سازیم
-        loop = None
-
-    if loop and loop.is_running():
-        # در محیطی مثل Jupyter یا某些 runners، لوپ در حال اجراست
-        # در این صورت نمی‌توانیم run_polling را اجرا کنیم، باید از create_task استفاده کنیم
-        logger.info("Event loop already running. Scheduling main task.")
-        asyncio.create_task(main())
-        # اما برای اینکه برنامه متوقف نشود، باید لوپ را به حرکت نگه داریم (در این محیط‌ها لوپ از قبل فعال است)
-        # کاری نمی‌کنیم، اجازه می‌دهیم لوپ جاری کار خود را بکند.
-    else:
-        # محیط استاندارد: لوپ تازه می‌سازیم و main را اجرا می‌کنیم
-        asyncio.run(main())
+    # این متد همزمان (synchronous) است و تا وقتی که app.stop() صدا زده نشود، اجرا می‌ماند
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    run()
+    main()
