@@ -7,14 +7,7 @@ import json
 import math
 from datetime import datetime
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from github import Github, Auth
 from github.GithubException import GithubException
 
@@ -59,7 +52,7 @@ class Session:
         self.chat_id = None
 
 session = Session()
-bot = Bot(token=BOT_TOKEN)  # تعریف اولیه bot برای استفاده در توابع
+bot = Bot(token=BOT_TOKEN)
 
 # ==================== توابع کمکی ====================
 def get_file_size_str(size_bytes):
@@ -70,7 +63,6 @@ def get_file_size_str(size_bytes):
     return f"{size_bytes:.1f} TB"
 
 async def update_status_message():
-    """بروزرسانی پیام وضعیت با لیست فایل‌ها و دکمه‌ها"""
     if not session.status_message_id or not session.chat_id:
         return
     text = "📂 **لیست فایل‌های آماده آپلود**\n\n"
@@ -99,7 +91,6 @@ async def update_status_message():
         logger.error(f"خطا در بروزرسانی پیام: {e}")
 
 async def download_file(file_id, file_name):
-    """دانلود فایل از تلگرام"""
     local_path = os.path.join(session.temp_dir, file_name)
     file = await bot.get_file(file_id)
     await file.download_to_drive(local_path)
@@ -107,7 +98,6 @@ async def download_file(file_id, file_name):
     return local_path
 
 def split_file(file_path, chunk_size=95*1024*1024):
-    """تقسیم فایل به قطعات 95 مگابایتی"""
     file_size = os.path.getsize(file_path)
     num_parts = math.ceil(file_size / chunk_size)
     parts = []
@@ -121,7 +111,6 @@ def split_file(file_path, chunk_size=95*1024*1024):
                 pf.write(part_data)
             parts.append(part_path)
             logger.info(f"📦 قطعه {i+1}/{num_parts}: {part_name}")
-    # فایل متادیتا
     manifest = {
         "original_name": base_name,
         "original_size": file_size,
@@ -137,13 +126,11 @@ def split_file(file_path, chunk_size=95*1024*1024):
     return parts, manifest_path
 
 async def upload_to_github(local_path, original_name, caption=""):
-    """آپلود فایل (کوچک مستقیم، بزرگ پارت‌بندی شده) در پوشه اختصاصی"""
     base_name = os.path.splitext(original_name)[0]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"uploads/{base_name}_{timestamp}/"
     file_size = os.path.getsize(local_path)
 
-    # ذخیره کپشن در فایل جداگانه
     if caption.strip():
         caption_file = os.path.join(os.path.dirname(local_path), f"{original_name}.caption.txt")
         with open(caption_file, "w", encoding="utf-8") as cf:
@@ -152,7 +139,6 @@ async def upload_to_github(local_path, original_name, caption=""):
     uploaded_urls = []
 
     if file_size <= 100 * 1024 * 1024:
-        # فایل کوچک
         remote_path = f"{folder_name}{original_name}"
         with open(local_path, "rb") as f:
             content = f.read()
@@ -167,9 +153,7 @@ async def upload_to_github(local_path, original_name, caption=""):
         uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_path}")
         logger.info(f"✅ آپلود شد (کوچک): {remote_path}")
     else:
-        # فایل بزرگ: تقسیم
         parts, manifest_path = split_file(local_path)
-        # آپلود قطعات
         for part_path in parts:
             part_name = os.path.basename(part_path)
             remote_part = f"{folder_name}{part_name}"
@@ -178,7 +162,6 @@ async def upload_to_github(local_path, original_name, caption=""):
             repo.create_file(remote_part, f"Upload {part_name}", content, branch="main")
             uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
             logger.info(f"✅ آپلود قطعه: {remote_part}")
-        # آپلود manifest
         with open(manifest_path, "rb") as mf:
             manifest_content = mf.read()
         remote_manifest = f"{folder_name}{os.path.basename(manifest_path)}"
@@ -186,7 +169,6 @@ async def upload_to_github(local_path, original_name, caption=""):
         uploaded_urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_manifest}")
         logger.info(f"✅ آپلود manifest: {remote_manifest}")
 
-    # آپلود کپشن اگر وجود داشت
     if caption.strip():
         remote_caption = f"{folder_name}{original_name}.caption.txt"
         with open(caption_file, "rb") as cf:
@@ -199,7 +181,6 @@ async def upload_to_github(local_path, original_name, caption=""):
 
 # ==================== هندلر اصلی برای دریافت هر نوع فایل ====================
 async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش هر نوع فایل (عکس، ویدیو، سند، صدا، استیکر و...)"""
     user = update.effective_user
     logger.info(f"📩 دریافت پیام از کاربر {user.id} (نام: {user.first_name})")
 
@@ -211,7 +192,6 @@ async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     caption = message.caption or ""
 
-    # تشخیص نوع فایل و استخراج اطلاعات
     file_obj = None
     file_name = None
 
@@ -219,7 +199,7 @@ async def handle_any_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_obj = message.document
         file_name = file_obj.file_name or f"document_{file_obj.file_unique_id}.bin"
     elif message.photo:
-        file_obj = message.photo[-1]  # بزرگترین سایز
+        file_obj = message.photo[-1]
         file_name = f"photo_{file_obj.file_unique_id}.jpg"
     elif message.video:
         file_obj = message.video
@@ -369,11 +349,10 @@ async def finish_session():
             await bot.send_message(chat_id=session.chat_id, text="👋 جلسه پایان یافت. ربات خاموش می‌شود.")
         except:
             pass
-    # خروج از برنامه
     os._exit(0)
 
 async def idle_timeout():
-    await asyncio.sleep(300)  # 5 دقیقه
+    await asyncio.sleep(300)
     logger.warning("⏰ تایم‌اوت 5 دقیقه - خاتمه جلسه")
     if session.chat_id:
         try:
@@ -394,10 +373,8 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # تایم‌اوت در پس‌زمینه
     asyncio.create_task(idle_timeout())
 
-    # ارسال پیام روشن شدن ربات به OWNER_ID
     try:
         await app.bot.send_message(chat_id=OWNER_ID, text="🤖 ربات آپلودر فعال شد.\nفایل ارسال کنید یا /start را بزنید.")
         logger.info("✅ پیام فعال شدن به OWNER_ID ارسال شد")
