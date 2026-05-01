@@ -1,0 +1,27 @@
+name: تلگرام → گیت‌هاب (جلسه آپلود)
+
+on:
+  workflow_dispatch:   # فقط با کلیک دستی در GitHub Actions
+
+jobs:
+  upload-session:
+    runs-on: ubuntu-latest
+    steps:
+      - name: بررسی محتوای مخزن
+        uses: actions/checkout@v4
+
+      - name: نصب پایتون
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: نصب کتابخانه‌های مورد نیاز
+        run: pip install python-telegram-bot PyGithub
+
+      - name: اجرای جلسه آپلود
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
+        run: python upload_session.py
