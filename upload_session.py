@@ -12,11 +12,11 @@ from github.GithubException import GithubException
 # ==================== تنظیمات از متغیرهای محیطی ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", 0))
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-REPO_NAME = os.getenv("REPO_NAME")      # به صورت "owner/repo"
+GH_TOKEN = os.getenv("GH_TOKEN")          # ← نام تغییر کرد
+REPO_NAME = os.getenv("REPO_NAME")        # به صورت "owner/repo"
 
-if not all([BOT_TOKEN, OWNER_ID, GITHUB_TOKEN, REPO_NAME]):
-    raise ValueError("لطفاً تمام متغیرهای محیطی را تنظیم کنید: BOT_TOKEN, OWNER_ID, GITHUB_TOKEN, REPO_NAME")
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME]):
+    raise ValueError("لطفاً تمام متغیرهای محیطی را تنظیم کنید: BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class Session:
 
 session = Session()
 bot = Bot(token=BOT_TOKEN)
-github = Github(GITHUB_TOKEN)
+github = Github(GH_TOKEN)                 # ← استفاده از GH_TOKEN
 repo = github.get_repo(REPO_NAME)
 
 # ==================== توابع کمکی ====================
@@ -83,7 +83,6 @@ async def upload_to_github_commit(file_path, file_name):
     with open(file_path, "rb") as f:
         content = f.read()
     try:
-        # بررسی وجود فایل قبلی (در صورت وجود، به‌روزرسانی)
         contents = repo.get_contents(remote_path)
         repo.update_file(contents.path, f"Update {file_name}", content, contents.sha, branch="main")
         logger.info(f"Updated {remote_path}")
@@ -93,12 +92,10 @@ async def upload_to_github_commit(file_path, file_name):
             logger.info(f"Created {remote_path}")
         else:
             raise
-    # لینک خام فایل در GitHub (برای نمایش به کاربر)
     return f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_path}"
 
 async def upload_to_github_release(file_path, file_name):
     """آپلود فایل بزرگ (>100MB) به عنوان یک Release Asset"""
-    # ایجاد یک release با برچسب زمان جلسه
     release_tag = f"upload-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     release_name = f"Upload session {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     release = repo.create_git_release(
@@ -108,7 +105,7 @@ async def upload_to_github_release(file_path, file_name):
     )
     with open(file_path, "rb") as f:
         asset = release.upload_asset(path=file_name, content=f, content_type="application/octet-stream")
-    return asset.browser_download_url  # لینک دانلود asset
+    return asset.browser_download_url
 
 # ==================== هندلرهای تلگرام ====================
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -117,11 +114,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("شما مجاز به استفاده از این بات نیستید.")
         return
     doc = update.message.document
-    # بررسی حجم فایل (حداکثر 2 گیگابایت برای API گیت‌هاب)
     if doc.file_size > 2 * 1024 * 1024 * 1024:
         await update.message.reply_text("❌ حجم فایل بیشتر از ۲ گیگابایت است و قابل آپلود به گیت‌هاب نیست.")
         return
-    # دانلود فایل
     local_path = await download_file(doc.file_id, doc.file_name)
     session.files.append({
         "name": doc.file_name,
@@ -129,7 +124,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "size": doc.file_size,
         "local_path": local_path
     })
-    # اگر پیام وضعیت وجود ندارد (اولین فایل)، آن را ایجاد کن
     if not session.status_message_id:
         session.chat_id = update.effective_chat.id
         msg = await update.message.reply_text("در حال آماده‌سازی...")
@@ -137,11 +131,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status_message()
     else:
         await update_status_message()
-    # حذف پیام ارسال فایل برای تمیزی
     await update.message.delete()
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پردازش دکمه‌های اینلاین"""
     query = update.callback_query
     await query.answer()
     if update.effective_user.id != OWNER_ID:
@@ -157,7 +149,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = []
         for f in session.files:
             try:
-                if f["size"] > 100 * 1024 * 1024:  # بزرگتر از 100 مگابایت
+                if f["size"] > 100 * 1024 * 1024:
                     url = await upload_to_github_release(f["local_path"], f["name"])
                     results.append(f"✅ {f['name']} (بزرگ) → آپلود شد در Release: {url}")
                 else:
@@ -166,10 +158,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"خطا در آپلود {f['name']}: {e}")
                 results.append(f"❌ {f['name']} → خطا: {str(e)}")
-        # نمایش نتیجه نهایی
         result_text = "**نتیجه آپلود:**\n" + "\n".join(results)
         await query.edit_message_text(result_text, parse_mode="Markdown", disable_web_page_preview=True)
-        # پایان جلسه
         await finish_session()
 
     elif data == "cancel":
@@ -198,21 +188,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("همه فایل‌ها پاک شدند.")
 
 async def finish_session():
-    """پاک کردن دایرکتوری موقت و خروج از برنامه"""
     shutil.rmtree(session.temp_dir, ignore_errors=True)
     if session.chat_id:
         await bot.send_message(chat_id=session.chat_id, text="👋 جلسه پایان یافت. ربات خاموش می‌شود.")
-    # خروج اجباری از برنامه (مناسب برای GitHub Actions)
     os._exit(0)
 
 async def idle_timeout():
-    """پس از ۵ دقیقه عدم فعالیت، جلسه را خاتمه بده"""
-    await asyncio.sleep(300)  # 5 دقیقه
+    await asyncio.sleep(300)
     if session.chat_id:
         await bot.send_message(chat_id=session.chat_id, text="⏰ عدم فعالیت به مدت ۵ دقیقه. جلسه خاتمه یافت.")
     await finish_session()
 
-# ==================== تابع اصلی ====================
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
@@ -222,10 +208,8 @@ async def main():
     await app.start()
     await app.updater.start_polling()
 
-    # تایمر پایان خودکار در پس‌زمینه
     asyncio.create_task(idle_timeout())
 
-    # منتظر می‌مانیم تا finish_session صدا زده شود (با os._exit قطع می‌شود)
     while True:
         await asyncio.sleep(1)
 
