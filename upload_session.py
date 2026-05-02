@@ -10,12 +10,13 @@ from datetime import datetime
 
 # ========== 1. کتابخانه‌های خارجی ==========
 try:
-    from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
     from github import Github, Auth
     from github.GithubException import GithubException
+    from pyrogram import Client as PyroClient
 except ImportError as e:
-    print("❌ خطا در وارد کردن کتابخانه‌ها:", e)
+    print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
 
 # ========== 2. متغیرهای محیطی ==========
@@ -23,11 +24,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
 
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
+    API_ID = int(API_ID) if API_ID else 0
 except ValueError:
-    OWNER_ID = 0
+    OWNER_ID = API_ID = 0
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -35,13 +40,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-logger.info("========== شروع بررسی متغیرها ==========")
-logger.info(f"BOT_TOKEN: {BOT_TOKEN[:5] if BOT_TOKEN else 'Missing'}...")
+logger.info("========== بررسی متغیرهای محیطی ==========")
+logger.info(f"BOT_TOKEN: {'OK' if BOT_TOKEN else 'Missing'}")
 logger.info(f"OWNER_ID: {OWNER_ID}")
-logger.info(f"GH_TOKEN: {GH_TOKEN[:5] if GH_TOKEN else 'Missing'}...")
+logger.info(f"GH_TOKEN: {'OK' if GH_TOKEN else 'Missing'}")
 logger.info(f"REPO_NAME: {REPO_NAME}")
+logger.info(f"API_ID: {API_ID}")
+logger.info(f"API_HASH: {'OK' if API_HASH else 'Missing'}")
+logger.info(f"SESSION_STRING: {'OK' if SESSION_STRING else 'Missing'}")
 
-if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME]):
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, SESSION_STRING]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
 # ========== 3. اتصال به گیت‌هاب ==========
@@ -54,19 +62,35 @@ except Exception as e:
     logger.error(f"GitHub connection error: {e}")
     raise
 
-# ========== 4. کلاس جلسه ==========
+# ========== 4. راه‌اندازی یوزربات Pyrogram ==========
+try:
+    pyro = PyroClient(
+        name="tg_uploader_userbot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+        in_memory=True   # فایل سشن فیزیکی ساخته نمی‌شود
+    )
+    await pyro.start()  # در main به صورت sync انجام می‌شود، اما اینجا تابع async است → جابجا می‌کنیم
+except Exception as e:
+    logger.error(f"Pyrogram init error: {e}")
+    raise
+
+# ========== 5. کلاس جلسه ==========
 class Session:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
         self.files = []
         self.status_msg_id = None
         self.chat_id = None
+        self.last_message_id = None   # برای دانلود با Pyrogram
         self.idle_task = None
         self.app = None
+        self.pyro = None
 
 session = Session()
 
-# ========== 5. توابع کمکی ==========
+# ========== 6. توابع کمکی ==========
 def size_str(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024:
@@ -97,11 +121,27 @@ async def update_status(bot):
     except Exception as e:
         logger.error(f"update_status error: {e}")
 
-async def download_file(file_id, name, bot):
+async def download_small_file(file_id, name, bot):
+    """Bot API برای فایل≤20MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
-    logger.info(f"Downloaded {name} ({os.path.getsize(path)} B)")
+    logger.info(f"Bot API downloaded: {name} ({os.path.getsize(path)} B)")
+    return path
+
+async def download_large_file(name):
+    """Pyrogram userbot برای فایل >20MB"""
+    if not session.pyro:
+        raise Exception("Pyrogram client not initialized")
+    path = os.path.join(session.temp_dir, name)
+    message = await session.pyro.get_messages(
+        chat_id=session.chat_id,
+        message_ids=session.last_message_id
+    )
+    if not message:
+        raise Exception("Message not found in Pyrogram")
+    await message.download(file_name=path)
+    logger.info(f"Pyrogram downloaded: {name} ({os.path.getsize(path)} B)")
     return path
 
 def split_large_file(path, chunk=95*1024*1024):
@@ -116,7 +156,7 @@ def split_large_file(path, chunk=95*1024*1024):
             with open(part_path, "wb") as dst:
                 dst.write(src.read(chunk))
             parts.append(part_path)
-            logger.info(f"Created part {i+1}/{num}: {part_name}")
+            logger.info(f"Part {i+1}/{num}: {part_name}")
     manifest = {
         "original": base,
         "size": size,
@@ -156,7 +196,7 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
             else:
                 raise
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote}")
-        logger.info(f"Uploaded small file: {remote}")
+        logger.info(f"Uploaded: {remote}")
     else:
         parts, man_path = split_large_file(local_path)
         for part in parts:
@@ -207,10 +247,10 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
 
 async def idle_timeout():
     await asyncio.sleep(300)
-    logger.warning("Idle timeout 5 minutes, ending session")
+    logger.warning("Idle timeout reached")
     if session.chat_id and session.app:
         try:
-            await session.app.bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
+            await session.app.bot.send_message(session.chat_id, "⏰ 5 minutes idle. Goodbye.")
         except:
             pass
     await finish()
@@ -221,31 +261,31 @@ async def reset_idle_timer():
     session.idle_task = asyncio.create_task(idle_timeout())
 
 async def finish():
-    logger.info("Finishing session, cleaning temp dir")
+    logger.info("Finishing session")
     if session.idle_task:
         session.idle_task.cancel()
     shutil.rmtree(session.temp_dir, ignore_errors=True)
     if session.chat_id and session.app:
         try:
-            await session.app.bot.send_message(session.chat_id, "👋 Session ended. Bot is shutting down.")
+            await session.app.bot.send_message(session.chat_id, "👋 Session ended. Bot stopped.")
         except:
             pass
+    if session.pyro:
+        await session.pyro.stop()
     if session.app:
         await session.app.stop()
 
-# ========== 6. هندلرها ==========
+# ========== 7. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    logger.info(f"/start from user {user_id}")
-    if user_id != OWNER_ID:
-        await update.message.reply_text("⛔ You are not allowed.")
+    user = update.effective_user
+    if user.id != OWNER_ID:
         return
     await update.message.reply_text(
         "🚀 **Telegram → GitHub Uploader**\n\n"
-        "Send me any file (photo, video, document, voice, sticker...).\n"
+        "Send me any file (photo, video, document, audio, sticker...).\n"
         "Files >100MB will be split into 95MB parts.\n"
-        "Each file gets its own folder in `uploads/`.\n"
-        "Use the buttons below to upload or cancel.\n\n"
+        "Large files (>20MB) are downloaded via userbot.\n\n"
+        "Use the buttons below to manage and upload.\n"
         "_Only you can use this bot._",
         parse_mode="Markdown"
     )
@@ -254,9 +294,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    logger.info(f"Received message from user {user.id}")
     if user.id != OWNER_ID:
-        await update.message.reply_text("⛔ Not allowed.")
+        await update.message.reply_text("⛔ Access denied.")
         return
 
     await reset_idle_timer()
@@ -297,19 +336,31 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not file_obj:
         return
 
-    file_id = file_obj.file_id
     file_size = file_obj.file_size or 0
 
     if file_size > 2*1024*1024*1024:
-        await msg.reply_text("File >2GB not supported (Telegram limit).")
+        await msg.reply_text("File >2GB not supported.")
         return
 
-    try:
-        local_path = await download_file(file_id, fname, context.bot)
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        await msg.reply_text(f"Download failed: {e}")
-        return
+    # ذخیره chat_id و message_id برای دانلود با Pyrogram
+    session.chat_id = msg.chat_id
+    session.last_message_id = msg.message_id
+
+    if file_size > 20 * 1024 * 1024:
+        logger.info(f"Large file ({size_str(file_size)}), using Pyrogram")
+        try:
+            local_path = await download_large_file(fname)
+        except Exception as e:
+            logger.error(f"Pyrogram download error: {e}")
+            await msg.reply_text(f"❌ Download failed (large file): {e}")
+            return
+    else:
+        try:
+            local_path = await download_small_file(file_obj.file_id, fname, context.bot)
+        except Exception as e:
+            logger.error(f"Bot API download error: {e}")
+            await msg.reply_text(f"❌ Download failed: {e}")
+            return
 
     session.files.append({
         "name": fname,
@@ -319,7 +370,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     if not session.status_msg_id:
-        session.chat_id = msg.chat_id
         status_msg = await msg.reply_text("⚙️ Preparing...")
         session.status_msg_id = status_msg.message_id
         await update_status(context.bot)
@@ -331,16 +381,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
+    logger.info(f"Added file: {fname}")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = update.effective_user
     if user.id != OWNER_ID:
-        await query.edit_message_text("Not allowed.")
+        await query.edit_message_text("Access denied.")
         return
 
     await reset_idle_timer()
-
     data = query.data
 
     if data == "upload":
@@ -357,14 +408,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     results.append(f"✅ {f['name']} → split into {len(urls)-1} parts. [manifest]({urls[-1]})")
             except Exception as e:
-                logger.error(f"Upload error for {f['name']}: {e}")
-                results.append(f"❌ {f['name']} → {str(e)}")
+                logger.error(f"Upload error: {f['name']} – {e}")
+                results.append(f"❌ {f['name']} – {str(e)}")
         final = "**Result:**\n\n" + "\n".join(results)
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
         await finish()
 
     elif data == "cancel":
-        await query.edit_message_text("Cancelled. Session ended.")
+        await query.edit_message_text("Cancelled.")
         await finish()
 
     elif data == "remove_last":
@@ -376,7 +427,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await update_status(context.bot)
         else:
-            await query.answer("List is empty")
+            await query.answer("List empty")
 
     elif data == "clear_all":
         for f in session.files:
@@ -388,16 +439,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. تابع post_init (به‌جای job_queue) ==========
+# ========== 8. راه‌اندازی اولیه ==========
 async def post_init(app: Application):
-    """بعد از آماده‌سازی ربات، پیام فعال بودن را برای مالک بفرست."""
+    """ارسال پیام شروع، بعد از آماده‌شدن Application"""
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
-# ========== 8. راه‌اندازی اصلی (همگام) ==========
-def main():
+async def main():
+    """بدنه اصلی برنامه"""
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
-    app.post_init = post_init   # ← مهم‌ترین تغییر: استفاده از post_init
+
+    # راه‌اندازی pyro در همین point
+    pyro_client = PyroClient(
+        name="tg_uploader_userbot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+        in_memory=True
+    )
+    await pyro_client.start()
+    session.pyro = pyro_client
+    logger.info("✅ Pyrogram userbot started")
+
+    app.post_init = post_init
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(
@@ -409,7 +473,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Starting polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
