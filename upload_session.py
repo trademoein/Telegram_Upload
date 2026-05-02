@@ -62,35 +62,21 @@ except Exception as e:
     logger.error(f"GitHub connection error: {e}")
     raise
 
-# ========== 4. راه‌اندازی یوزربات Pyrogram ==========
-try:
-    pyro = PyroClient(
-        name="tg_uploader_userbot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        in_memory=True   # فایل سشن فیزیکی ساخته نمی‌شود
-    )
-    await pyro.start()  # در main به صورت sync انجام می‌شود، اما اینجا تابع async است → جابجا می‌کنیم
-except Exception as e:
-    logger.error(f"Pyrogram init error: {e}")
-    raise
-
-# ========== 5. کلاس جلسه ==========
+# ========== 4. کلاس جلسه ==========
 class Session:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
         self.files = []
         self.status_msg_id = None
         self.chat_id = None
-        self.last_message_id = None   # برای دانلود با Pyrogram
+        self.last_message_id = None
         self.idle_task = None
         self.app = None
         self.pyro = None
 
 session = Session()
 
-# ========== 6. توابع کمکی ==========
+# ========== 5. توابع کمکی ==========
 def size_str(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024:
@@ -122,7 +108,7 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
-    """Bot API برای فایل≤20MB"""
+    """دانلود فایل ≤ 20MB با Bot API"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -130,7 +116,7 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
-    """Pyrogram userbot برای فایل >20MB"""
+    """دانلود فایل > 20MB با Pyrogram (userbot)"""
     if not session.pyro:
         raise Exception("Pyrogram client not initialized")
     path = os.path.join(session.temp_dir, name)
@@ -275,7 +261,7 @@ async def finish():
     if session.app:
         await session.app.stop()
 
-# ========== 7. هندلرها ==========
+# ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
@@ -439,7 +425,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 8. راه‌اندازی اولیه ==========
+# ========== 7. راه‌اندازی اولیه ==========
 async def post_init(app: Application):
     """ارسال پیام شروع، بعد از آماده‌شدن Application"""
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
@@ -449,7 +435,7 @@ async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
 
-    # راه‌اندازی pyro در همین point
+    # راه‌اندازی pyro در همین نقطه (داخل تابع async)
     pyro_client = PyroClient(
         name="tg_uploader_userbot",
         api_id=API_ID,
