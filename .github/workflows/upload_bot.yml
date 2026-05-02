@@ -1,12 +1,12 @@
 name: Telegram Upload Bot
 
 on:
-  workflow_dispatch:   # فقط دستی اجرا می‌شود
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360   # حداکثر ۶ ساعت
+    timeout-minutes: 360
 
     steps:
     - name: Checkout repository
@@ -18,9 +18,12 @@ jobs:
         python-version: '3.11'
 
     - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -r requirements.txt
+      run: pip install -r requirements.txt
+
+    - name: Decode Telethon session file
+      env:
+        SESSION_FILE_BASE64: ${{ secrets.SESSION_FILE_BASE64 }}
+      run: echo "$SESSION_FILE_BASE64" | base64 -d > my_account.session
 
     - name: Run the bot
       env:
@@ -30,5 +33,4 @@ jobs:
         REPO_NAME: ${{ secrets.REPO_NAME }}
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
-        SESSION_STRING: ${{ secrets.SESSION_STRING }}
       run: python upload_session.py
