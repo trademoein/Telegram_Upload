@@ -400,9 +400,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. تابع اصلی با مدیریت حلقه رویداد ==========
+# ========== 7. تابع اصلی ساده و استاندارد ==========
 async def main():
-    """تابع async اصلی که مدیریت ربات را بر عهده دارد"""
+    """راه‌اندازی و اجرای ربات"""
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app   # ذخیره ارجاع برای finish
 
@@ -424,25 +424,9 @@ async def main():
         logger.error(f"Could not send startup message: {e}")
 
     logger.info("Starting polling...")
+    # اجرای ربات (تا زمانی که stop نشده باشه ادامه داره)
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-def run():
-    """ورودی اصلی برنامه - مدیریت حلقه رویداد برای محیط‌های مختلف"""
-    try:
-        # تلاش برای استفاده از حلقه موجود
-        loop = asyncio.get_running_loop()
-        # اگر به اینجا رسیدیم، یعنی حلقه در حال اجراست (مثل محیط Jupyter یا بعضی از runners)
-        # در این حالت نمی‌توانیم دوباره run_until_complete کنیم، پس یک task ایجاد می‌کنیم
-        asyncio.create_task(main())
-        logger.info("Running in existing event loop")
-    except RuntimeError:
-        # هیچ حلقه‌ای در حال اجرا نیست، یک حلقه جدید می‌سازیم
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(main())
-        finally:
-            loop.close()
-
 if __name__ == "__main__":
-    run()
+    # ساده و تمیز: فقط main رو اجرا کن، بقیه کارها رو خود asyncio انجام میده
+    asyncio.run(main())
