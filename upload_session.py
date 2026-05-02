@@ -14,7 +14,8 @@ try:
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
     from github import Github, Auth
     from github.GithubException import GithubException
-    from pyrogram import Client as PyroClient
+    from telethon import TelegramClient
+    from telethon.tl.types import Document, Photo, Video, Audio, Voice, Animation, VideoNote, Sticker
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
@@ -26,7 +27,6 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
 
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
@@ -47,9 +47,8 @@ logger.info(f"GH_TOKEN: {'OK' if GH_TOKEN else 'Missing'}")
 logger.info(f"REPO_NAME: {REPO_NAME}")
 logger.info(f"API_ID: {API_ID}")
 logger.info(f"API_HASH: {'OK' if API_HASH else 'Missing'}")
-logger.info(f"SESSION_STRING: {'OK' if SESSION_STRING else 'Missing'}")
 
-if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, SESSION_STRING]):
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
 # ========== 3. اتصال به گیت‌هاب ==========
@@ -72,7 +71,7 @@ class Session:
         self.last_message_id = None
         self.idle_task = None
         self.app = None
-        self.pyro = None
+        self.userbot = None   # Telethon client
 
 session = Session()
 
@@ -108,7 +107,7 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
-    """دانلود فایل ≤ 20MB با Bot API"""
+    """Bot API برای فایل≤20MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -116,18 +115,16 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
-    """دانلود فایل > 20MB با Pyrogram (userbot)"""
-    if not session.pyro:
-        raise Exception("Pyrogram client not initialized")
+    """Telethon userbot برای فایل >20MB"""
+    if not session.userbot:
+        raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
-    message = await session.pyro.get_messages(
-        chat_id=session.chat_id,
-        message_ids=session.last_message_id
-    )
+    # دریافت پیام اصلی با Telethon
+    message = await session.userbot.get_messages(session.chat_id, ids=session.last_message_id)
     if not message:
-        raise Exception("Message not found in Pyrogram")
-    await message.download(file_name=path)
-    logger.info(f"Pyrogram downloaded: {name} ({os.path.getsize(path)} B)")
+        raise Exception("Message not found via userbot")
+    await message.download_media(file=path)
+    logger.info(f"Userbot downloaded: {name} ({os.path.getsize(path)} B)")
     return path
 
 def split_large_file(path, chunk=95*1024*1024):
@@ -256,8 +253,8 @@ async def finish():
             await session.app.bot.send_message(session.chat_id, "👋 Session ended. Bot stopped.")
         except:
             pass
-    if session.pyro:
-        await session.pyro.stop()
+    if session.userbot:
+        await session.userbot.disconnect()
     if session.app:
         await session.app.stop()
 
@@ -270,7 +267,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 **Telegram → GitHub Uploader**\n\n"
         "Send me any file (photo, video, document, audio, sticker...).\n"
         "Files >100MB will be split into 95MB parts.\n"
-        "Large files (>20MB) are downloaded via userbot.\n\n"
+        "Large files (>20MB) are downloaded via userbot (Telethon).\n\n"
         "Use the buttons below to manage and upload.\n"
         "_Only you can use this bot._",
         parse_mode="Markdown"
@@ -328,16 +325,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("File >2GB not supported.")
         return
 
-    # ذخیره chat_id و message_id برای دانلود با Pyrogram
     session.chat_id = msg.chat_id
     session.last_message_id = msg.message_id
 
     if file_size > 20 * 1024 * 1024:
-        logger.info(f"Large file ({size_str(file_size)}), using Pyrogram")
+        logger.info(f"Large file ({size_str(file_size)}), using userbot")
         try:
             local_path = await download_large_file(fname)
         except Exception as e:
-            logger.error(f"Pyrogram download error: {e}")
+            logger.error(f"Userbot download error: {e}")
             await msg.reply_text(f"❌ Download failed (large file): {e}")
             return
     else:
@@ -425,27 +421,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی اولیه ==========
+# ========== 7. راه‌اندازی ==========
 async def post_init(app: Application):
-    """ارسال پیام شروع، بعد از آماده‌شدن Application"""
-    await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot integrated). Send me files or use /start")
 
 async def main():
-    """بدنه اصلی برنامه"""
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
 
-    # راه‌اندازی pyro در همین نقطه (داخل تابع async)
-    pyro_client = PyroClient(
-        name="tg_uploader_userbot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        in_memory=True
-    )
-    await pyro_client.start()
-    session.pyro = pyro_client
-    logger.info("✅ Pyrogram userbot started")
+    # راه‌اندازی Telethon client (استفاده از فایل session موجود)
+    userbot = TelegramClient('my_account', API_ID, API_HASH)
+    await userbot.start()
+    session.userbot = userbot
+    logger.info("✅ Telethon userbot started")
 
     app.post_init = post_init
 
