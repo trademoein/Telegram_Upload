@@ -61,8 +61,8 @@ class Session:
         self.files = []
         self.status_msg_id = None
         self.chat_id = None
-        self.idle_task = None   # برای مدیریت تایم‌اوت
-        self.app = None         # ارجاع به اپلیکیشن برای stop()
+        self.idle_task = None
+        self.app = None
 
 session = Session()
 
@@ -206,26 +206,21 @@ async def upload_to_github(local_path, orig_name, caption_text=""):
     return urls
 
 async def idle_timeout():
-    """منتظر 5 دقیقه و سپس خاموش کردن ربات"""
     await asyncio.sleep(300)
     logger.warning("Idle timeout 5 minutes, ending session")
-    if session.chat_id:
+    if session.chat_id and session.app:
         try:
-            bot = session.app.bot if session.app else None
-            if bot:
-                await bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
+            await session.app.bot.send_message(session.chat_id, "⏰ No activity for 5 minutes. Goodbye.")
         except:
             pass
     await finish()
 
 async def reset_idle_timer():
-    """لغو تایمر قبلی و ایجاد تایمر جدید"""
     if session.idle_task:
         session.idle_task.cancel()
     session.idle_task = asyncio.create_task(idle_timeout())
 
 async def finish():
-    """پایان جلسه و توقف ربات"""
     logger.info("Finishing session, cleaning temp dir")
     if session.idle_task:
         session.idle_task.cancel()
@@ -236,7 +231,7 @@ async def finish():
         except:
             pass
     if session.app:
-        await session.app.stop()   # توقف ربات
+        await session.app.stop()
 
 # ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,7 +249,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "_Only you can use this bot._",
         parse_mode="Markdown"
     )
-    # شروع تایمر بیکاری (اگر هنوز شروع نشده)
     if not session.idle_task:
         await reset_idle_timer()
 
@@ -263,10 +257,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Received message from user {user.id}")
     if user.id != OWNER_ID:
         await update.message.reply_text("⛔ Not allowed.")
-        logger.warning(f"Blocked user {user.id}")
         return
 
-    # ریست تایمر بیکاری
     await reset_idle_timer()
 
     msg = update.message
@@ -307,7 +299,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_id = file_obj.file_id
     file_size = file_obj.file_size or 0
-    logger.info(f"File: {fname}, size={file_size}, type={type(file_obj).__name__}")
 
     if file_size > 2*1024*1024*1024:
         await msg.reply_text("File >2GB not supported (Telegram limit).")
@@ -340,8 +331,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    logger.info(f"Added file {fname}. Total: {len(session.files)}")
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -353,7 +342,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reset_idle_timer()
 
     data = query.data
-    logger.info(f"Button: {data}")
 
     if data == "upload":
         if not session.files:
@@ -400,13 +388,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. تابع اصلی ساده و استاندارد ==========
-async def main():
-    """راه‌اندازی و اجرای ربات"""
-    app = Application.builder().token(BOT_TOKEN).build()
-    session.app = app   # ذخیره ارجاع برای finish
+# ========== 7. راه‌اندازی کاملاً همگام و بدون تداخل ==========
+async def send_startup_message(context: ContextTypes.DEFAULT_TYPE):
+    """پیام شروع به مالک، یک ثانیه بعد از آماده‌شدن ربات."""
+    await context.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
-    # افزودن هندلرها
+def main():
+    """ساخت اپلیکیشن، ثبت هندلرها و شروع polling (بدون asyncio.run خارجی)."""
+    app = Application.builder().token(BOT_TOKEN).build()
+    session.app = app   # ذخیره برای finish()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE |
@@ -416,17 +407,11 @@ async def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # ارسال پیام شروع به مالک (اختیاری)
-    try:
-        await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
-        logger.info("Startup message sent to owner")
-    except Exception as e:
-        logger.error(f"Could not send startup message: {e}")
+    # ارسال پیام خوش‌آمد با JobQueue (بدون دخالت حلقه دستی)
+    app.job_queue.run_once(send_startup_message, when=1)
 
     logger.info("Starting polling...")
-    # اجرای ربات (تا زمانی که stop نشده باشه ادامه داره)
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    # ساده و تمیز: فقط main رو اجرا کن، بقیه کارها رو خود asyncio انجام میده
-    asyncio.run(main())
+    main()
