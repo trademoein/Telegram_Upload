@@ -388,15 +388,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی کاملاً همگام و بدون تداخل ==========
-async def send_startup_message(context: ContextTypes.DEFAULT_TYPE):
-    """پیام شروع به مالک، یک ثانیه بعد از آماده‌شدن ربات."""
-    await context.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
+# ========== 7. تابع post_init (به‌جای job_queue) ==========
+async def post_init(app: Application):
+    """بعد از آماده‌سازی ربات، پیام فعال بودن را برای مالک بفرست."""
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
+# ========== 8. راه‌اندازی اصلی (همگام) ==========
 def main():
-    """ساخت اپلیکیشن، ثبت هندلرها و شروع polling (بدون asyncio.run خارجی)."""
     app = Application.builder().token(BOT_TOKEN).build()
-    session.app = app   # ذخیره برای finish()
+    session.app = app
+    app.post_init = post_init   # ← مهم‌ترین تغییر: استفاده از post_init
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(
@@ -406,9 +407,6 @@ def main():
         handle_file
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # ارسال پیام خوش‌آمد با JobQueue (بدون دخالت حلقه دستی)
-    app.job_queue.run_once(send_startup_message, when=1)
 
     logger.info("Starting polling...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
