@@ -15,6 +15,7 @@ try:
     from github import Github, Auth
     from github.GithubException import GithubException
     from telethon import TelegramClient
+    from telethon.sessions import StringSession
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
@@ -26,6 +27,7 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 REPO_NAME = os.getenv("REPO_NAME")
 API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
 
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
@@ -46,8 +48,9 @@ logger.info(f"GH_TOKEN: {'OK' if GH_TOKEN else 'Missing'}")
 logger.info(f"REPO_NAME: {REPO_NAME}")
 logger.info(f"API_ID: {API_ID}")
 logger.info(f"API_HASH: {'OK' if API_HASH else 'Missing'}")
+logger.info(f"SESSION_STRING: {'OK' if SESSION_STRING else 'Missing'}")
 
-if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH]):
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, SESSION_STRING]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
 # ========== 3. اتصال به گیت‌هاب ==========
@@ -118,7 +121,6 @@ async def download_large_file(name):
     if not session.userbot:
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
-    # دریافت پیام اصلی با Telethon
     message = await session.userbot.get_messages(session.chat_id, ids=session.last_message_id)
     if not message:
         raise Exception("Message not found via userbot")
@@ -319,7 +321,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     file_size = file_obj.file_size or 0
-
     if file_size > 2*1024*1024*1024:
         await msg.reply_text("File >2GB not supported.")
         return
@@ -422,17 +423,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== 7. راه‌اندازی ==========
 async def post_init(app: Application):
-    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot integrated). Send me files or use /start")
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot via Session String). Send me files or use /start")
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
 
-    # راه‌اندازی Telethon client (استفاده از فایل session موجود)
-    userbot = TelegramClient('my_account', API_ID, API_HASH)
+    # *** استفاده از StringSession به جای فایل سشن فیزیکی ***
+    userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await userbot.start()
     session.userbot = userbot
-    logger.info("✅ Telethon userbot started")
+    logger.info("✅ Telethon userbot started (StringSession)")
 
     app.post_init = post_init
 
