@@ -15,7 +15,6 @@ try:
     from github import Github, Auth
     from github.GithubException import GithubException
     from telethon import TelegramClient
-    from telethon.tl.types import Document, Photo, Video, Audio, Voice, Animation, VideoNote, Sticker
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
