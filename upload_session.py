@@ -19,10 +19,10 @@ try:
     from telethon.crypto import AuthKey
     from telethon.tl.types import InputMessagesFilterPhotoVideoDocuments
 except ImportError as e:
-    print(f"❌ کتابخانه ناقص: {e}")
+    print(f"❌ کتابخانه ناقص: {e}\nلطفاً با دستور زیر نصب کنید:\npip install python-telegram-bot PyGithub telethon")
     sys.exit(1)
 
-# =========================== متغیرهای محیطی ===========================
+# =========================== متغیرهای محیطی (از یک اکانت) ===========================
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 OWNER_ID        = os.getenv("OWNER_ID")
 GH_TOKEN        = os.getenv("GH_TOKEN")
@@ -41,50 +41,54 @@ try:
 except ValueError:
     OWNER_ID = API_ID = DC_ID = USER_ID = 0
 
-# =========================== لاگینگ ===========================
+# =========================== لاگینگ حرفه‌ای ===========================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger("TG_Uploader")
 
-# بررسی متغیرها
-required = {
-    "BOT_TOKEN": BOT_TOKEN, "OWNER_ID": OWNER_ID, "GH_TOKEN": GH_TOKEN,
-    "REPO_NAME": REPO_NAME, "API_ID": API_ID, "API_HASH": API_HASH,
-    "DC_ID": DC_ID, "AUTH_KEY_HEX": AUTH_KEY_HEX, "USER_ID": USER_ID
-}
-missing = [k for k, v in required.items() if not v]
+# بررسی متغیرهای اجباری
+missing = []
+if not BOT_TOKEN: missing.append("BOT_TOKEN")
+if not OWNER_ID: missing.append("OWNER_ID")
+if not GH_TOKEN: missing.append("GH_TOKEN")
+if not REPO_NAME: missing.append("REPO_NAME")
+if not API_ID: missing.append("API_ID")
+if not API_HASH: missing.append("API_HASH")
+if not DC_ID: missing.append("DC_ID")
+if not AUTH_KEY_HEX: missing.append("AUTH_KEY_HEX")
+if not USER_ID: missing.append("USER_ID")
 if missing:
-    raise ValueError(f"متغیرهای گم شده: {', '.join(missing)}")
+    raise ValueError(f"❌ متغیرهای محیطی گم شده: {', '.join(missing)}")
 
-logger.info(f"✅ محیط OK | OWNER: {OWNER_ID} | REPO: {REPO_NAME} | DC: {DC_ID}")
+logger.info(f"✅ متغیرها تأیید شدند | OWNER: {OWNER_ID} | REPO: {REPO_NAME} | DC: {DC_ID} | USER: {USER_ID}")
 
 # =========================== اتصال به گیت‌هاب ===========================
 try:
     auth = Auth.Token(GH_TOKEN)
     github = Github(auth=auth)
     repo = github.get_repo(REPO_NAME)
-    logger.info(f"✅ به گیت‌هاب متصل شد: {REPO_NAME}")
+    logger.info(f"✅ متصل به مخزن گیت‌هاب: {REPO_NAME}")
 except Exception as e:
-    logger.error(f"❌ خطای گیت‌هاب: {e}")
+    logger.error(f"❌ خطای اتصال به گیت‌هاب: {e}")
     raise
 
-# =========================== کلید نشست ===========================
+# =========================== کلاس مدیریت نشست ===========================
 class Session:
     def __init__(self):
-        self.temp_dir = None
-        self.files = []
-        self.status_msg_id = None
-        self.chat_id = None
-        self.idle_task = None
-        self.app = None
-        self.userbot = None
-        self.me_id = None
-        self.bot_username = None
+        self.temp_dir = None          # دایرکتوری موقت
+        self.files = []               # لیست فایل‌های آماده
+        self.status_msg_id = None     # پیام وضعیت
+        self.chat_id = None           # چت با مالک
+        self.idle_task = None         # تایمر بی‌کاری
+        self.app = None               # اپلیکیشن ربات
+        self.userbot = None           # کلاینت Telethon
+        self.bot_username = None      # نام کاربری ربات (مثلاً @MyBot)
 
 session = Session()
 
+# =========================== توابع کمکی ===========================
 def size_str(size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024:
@@ -93,19 +97,20 @@ def size_str(size: int) -> str:
     return f"{size:.1f} TB"
 
 async def update_status(bot):
+    """به‌روزرسانی پیام حاوی دکمه‌ها و لیست فایل‌ها"""
     if not session.status_msg_id or not session.chat_id:
         return
     text = "📂 **فایل‌های آماده**\n\n"
     if not session.files:
-        text += "هیچ فایلی نداریم."
+        text += "هیچ فایلی اضافه نشده است."
     else:
         for i, f in enumerate(session.files, 1):
             text += f"{i}. {f['name']} ({size_str(f['size'])})\n"
     text += f"\nتعداد: {len(session.files)}"
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 آپلود", callback_data="upload")],
-        [InlineKeyboardButton("❌ لغو", callback_data="cancel")],
+        [InlineKeyboardButton("📤 آپلود همه", callback_data="upload")],
+        [InlineKeyboardButton("❌ لغو و پایان", callback_data="cancel")],
         [InlineKeyboardButton("🗑 حذف آخرین", callback_data="remove_last"),
          InlineKeyboardButton("🧹 پاک کردن همه", callback_data="clear_all")]
     ])
@@ -121,11 +126,12 @@ async def reset_idle():
     session.idle_task = asyncio.create_task(idle_timeout())
 
 async def idle_timeout():
-    await asyncio.sleep(300)
-    logger.warning("⏰ بی‌کاری ۵ دقیقه - پایان نشست")
+    await asyncio.sleep(300)  # 5 دقیقه
+    logger.warning("⏰ تایم‌اوت بی‌کاری - پایان نشست")
     await finish(send_message=True)
 
 async def finish(send_message: bool = True):
+    """پاکسازی کامل نشست و قطع اتصالات"""
     if session.idle_task:
         session.idle_task.cancel()
     if session.temp_dir and os.path.exists(session.temp_dir):
@@ -136,49 +142,51 @@ async def finish(send_message: bool = True):
     session.chat_id = None
     if send_message and session.app and OWNER_ID:
         try:
-            await session.app.bot.send_message(OWNER_ID, "👋 نشست پایان یافت. /start برای شروع مجدد")
+            await session.app.bot.send_message(OWNER_ID, "👋 نشست پایان یافت. برای شروع مجدد /start را بزنید.")
         except Exception as e:
             logger.error(f"خطا در ارسال پیام خاتمه: {e}")
     if session.userbot:
         await session.userbot.disconnect()
         logger.info("یوزربات قطع شد.")
 
-# =========================== دانلود فایل ===========================
+# =========================== دانلود فایل‌ها ===========================
 async def download_small_file(file_id: str, name: str, bot):
+    """دانلود فایل‌های ≤20MB با Bot API"""
     path = os.path.join(session.temp_dir, name)
     file = await bot.get_file(file_id)
     await file.download_to_drive(path)
-    logger.info(f"✅ دانلود کوچک (Bot API): {name} ({os.path.getsize(path)} B)")
+    logger.info(f✅ دانلود با Bot API: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-async def download_large_file(name: str, chat_entity):
+async def download_large_file(name: str):
     """
-    دانلود آخرین فایل ارسالی کاربر (یوزربات) به ربات.
-    chat_entity: نام کاربری ربات یا entity معتبر
+    دانلود فایل بزرگ (>20MB) با یوزربات.
+    استراتژی: دریافت آخرین پیام رسانه‌ای که خود یوزربات (اکانت اصلی) به ربات فرستاده است.
     """
-    if not session.userbot or not session.me_id:
-        raise Exception("یوزربات آماده نیست")
+    if not session.userbot or not session.bot_username:
+        raise Exception("یوزربات یا نام کاربری ربات مقداردهی نشده است.")
+    
     path = os.path.join(session.temp_dir, name)
-
     try:
-        # دریافت آخرین پیام رسانه‌ای ارسال شده توسط خود کاربر (یوزربات) به این چت
+        # فقط جدیدترین پیام رسانه‌ای (عکس، ویدیو، سند) که توسط خودمان فرستاده شده
         async for msg in session.userbot.iter_messages(
-            chat_entity,
-            from_user='me',  # فقط پیام‌های ارسالی خودم
-            filter=InputMessagesFilterPhotoVideoDocuments,  # فقط عکس، ویدیو، سند
-            limit=1  # فقط جدیدترین
+            session.bot_username,          # چت با ربات
+            from_user='me',                # فقط پیام‌های ارسالی خودم
+            filter=InputMessagesFilterPhotoVideoDocuments,  # فقط فایل‌های رسانه‌ای
+            limit=1                        # فقط آخرین مورد
         ):
             if msg and msg.media:
                 await msg.download_media(file=path)
-                logger.info(f"✅ دانلود با یوزربات (آخرین رسانه شما) از چت {chat_entity}")
+                logger.info(f✅ دانلود با یوزربات: {name} ({size_str(os.path.getsize(path))})")
                 return path
-        raise Exception("هیچ پیام رسانه‌ای از شما در این چت یافت نشد.")
+        raise Exception("هیچ فایل رسانه‌ای از شما در چت با ربات یافت نشد. مطمئن شوید فایل را ارسال کرده‌اید.")
     except Exception as e:
-        logger.error(f"❌ دانلود با یوزربات شکست خورد: {e}")
+        logger.error(f"❌ خطا در دانلود با یوزربات: {e}")
         raise
 
-# =========================== آپلود در گیت‌هاب ===========================
+# =========================== آپلود در گیت‌هاب (با قابلیت تقسیم) ===========================
 def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
+    """تقسیم فایل به قطعات 95MB به همراه منیفست"""
     size = os.path.getsize(path)
     num = math.ceil(size / chunk)
     parts = []
@@ -195,26 +203,30 @@ def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
         "size": size,
         "chunk": chunk,
         "parts": [os.path.basename(p) for p in parts],
-        "recombine": f"cat {base}.part* > {base}"
+        "recombine_linux": f"cat {base}.part* > {base}",
+        "recombine_windows": f"copy /b {base}.part* {base}"
     }
     man_path = os.path.join(os.path.dirname(path), f"{base}.manifest.json")
-    with open(man_path, "w") as mf:
+    with open(man_path, "w", encoding="utf-8") as mf:
         json.dump(manifest, mf, indent=2)
     return parts, man_path
 
 async def upload_to_github(local_path: str, orig_name: str, caption_text: str = ""):
+    """آپلود فایل (یا قطعات) به گیت‌هاب، بازگشت لیست آدرس‌های raw"""
     base = os.path.splitext(orig_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder = f"uploads/{base}_{ts}/"
     size = os.path.getsize(local_path)
     urls = []
 
+    # ذخیره کپشن در فایل جداگانه (در صورت وجود)
     cap_path = None
     if caption_text.strip():
         cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
+    # آپلود فایل کامل اگر ≤100MB
     if size <= 100 * 1024 * 1024:
         remote = f"{folder}{orig_name}"
         with open(local_path, "rb") as f:
@@ -222,7 +234,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
         try:
             repo.create_file(remote, f"Upload {orig_name}", data, branch="main")
         except GithubException as e:
-            if e.status == 409:
+            if e.status == 409:  # فایل وجود دارد -> آپدیت
                 contents = repo.get_contents(remote)
                 repo.update_file(remote, f"Update {orig_name}", data, contents.sha, branch="main")
             else:
@@ -230,6 +242,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote}")
         logger.info(f"✅ آپلود کامل: {remote}")
     else:
+        # تقسیم و آپلود قطعات
         parts, man_path = split_large_file(local_path)
         for part in parts:
             pname = os.path.basename(part)
@@ -246,6 +259,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
                     raise
             urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
             logger.info(f"✅ آپلود قطعه: {remote_part}")
+        # آپلود منیفست
         with open(man_path, "rb") as mf:
             man_data = mf.read()
         remote_man = f"{folder}{os.path.basename(man_path)}"
@@ -260,6 +274,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
         logger.info("✅ منیفست آپلود شد")
 
+    # آپلود فایل کپشن
     if cap_path:
         remote_cap = f"{folder}{orig_name}.caption.txt"
         with open(cap_path, "rb") as cf:
@@ -277,24 +292,26 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
 
     return urls
 
-# =========================== هندلرهای ربات ===========================
+# =========================== هندلرهای ربات تلگرام ===========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
         await update.message.reply_text("⛔ دسترسی غیرمجاز.")
         return
+    # پاک کردن نشست قبلی
     if session.chat_id is not None:
         await finish(send_message=False)
-    # مقداردهی اولیه دایرکتوری
+    # ساخت دایرکتوری موقت
     if session.temp_dir is None:
         session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = update.effective_chat.id
     await update.message.reply_text(
         "🚀 **آپلودر تلگرام → گیت‌هاب**\n\n"
-        "فایل خود را ارسال کنید.\n"
-        "فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
-        "فایل‌های >۱۰۰MB به قطعات ۹۵MB تقسیم می‌شوند.\n\n"
-        "از دکمه‌های زیر برای مدیریت استفاده کنید.",
+        "✅ فایل خود را ارسال کنید (عکس، ویدیو، سند، صدا، استیکر و...)\n"
+        "🔹 فایل‌های بزرگتر از ۲۰ مگابایت با **یوزربات** دانلود می‌شوند.\n"
+        "🔹 فایل‌های بزرگتر از ۱۰۰ مگابایت به قطعات ۹۵ مگابایتی تقسیم می‌شوند.\n"
+        "🔹 از دکمه‌های زیر برای مدیریت و آپلود استفاده کنید.\n\n"
+        "_فقط شما مجاز به استفاده هستید._",
         parse_mode="Markdown"
     )
     await reset_idle()
@@ -305,9 +322,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ دسترسی غیرمجاز.")
         return
     if update.effective_chat.type != "private":
-        await update.message.reply_text("لطفاً در چت خصوصی استفاده کنید.")
+        await update.message.reply_text("لطفاً در چت خصوصی از ربات استفاده کنید.")
         return
 
+    # اگر نشست فعال نیست، ابتدا start را صدا بزن
     if session.chat_id is None or session.temp_dir is None:
         await start(update, context)
         await asyncio.sleep(0.5)
@@ -319,6 +337,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_obj = None
     fname = None
 
+    # تشخیص نوع فایل
     if msg.document:
         file_obj = msg.document
         fname = file_obj.file_name or f"doc_{file_obj.file_unique_id}.bin"
@@ -348,27 +367,28 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     file_size = file_obj.file_size or 0
-    if file_size > 2 * 1024 * 1024 * 1024:
-        await msg.reply_text("❌ حجم فایل بیشتر از ۲ گیگابایت است.")
+    if file_size > 2 * 1024 * 1024 * 1024:  # 2GB
+        await msg.reply_text("❌ حجم فایل بیشتر از ۲ گیگابایت است. پشتیبانی نمی‌شود.")
         return
 
     if session.temp_dir is None:
         session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = msg.chat_id
 
+    # انتخاب روش دانلود
     try:
         if file_size > 20 * 1024 * 1024:
-            logger.info(f"فایل بزرگ ({size_str(file_size)}) - استفاده از یوزربات")
-            # استفاده از نام کاربری ربات برای دانلود آخرین فایل ارسالی شما
-            local_path = await download_large_file(fname, session.bot_username)
+            logger.info(f"📥 فایل بزرگ ({size_str(file_size)}) - دانلود با یوزربات...")
+            local_path = await download_large_file(fname)
         else:
-            logger.info(f"فایل کوچک ({size_str(file_size)}) - Bot API")
+            logger.info(f"📥 فایل کوچک ({size_str(file_size)}) - دانلود با Bot API...")
             local_path = await download_small_file(file_obj.file_id, fname, context.bot)
     except Exception as e:
-        logger.error(f"خطا در دانلود {fname}: {e}", exc_info=True)
+        logger.error(f"❌ خطا در دانلود {fname}: {e}", exc_info=True)
         await msg.reply_text(f"❌ دانلود ناموفق: {str(e)}")
         return
 
+    # ذخیره اطلاعات فایل در لیست نشست
     session.files.append({
         "name": fname,
         "size": file_size,
@@ -376,18 +396,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": caption
     })
 
+    # ایجاد یا به‌روزرسانی پیام وضعیت
     if not session.status_msg_id:
-        status_msg = await msg.reply_text("⚙️ آماده‌سازی...")
+        status_msg = await msg.reply_text("⚙️ در حال آماده‌سازی...")
         session.status_msg_id = status_msg.message_id
         await update_status(context.bot)
     else:
         await update_status(context.bot)
 
+    # واکنش به پیام (اختیاری)
     try:
         await msg.react(emoji="📥")
     except:
         pass
-    logger.info(f"فایل اضافه شد: {fname} ({size_str(file_size)})")
+
+    logger.info(f"✅ فایل اضافه شد: {fname} ({size_str(file_size)})")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -402,26 +425,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "upload":
         if not session.files:
-            await query.edit_message_text("❌ هیچ فایلی برای آپلود نیست.")
+            await query.edit_message_text("❌ هیچ فایلی برای آپلود وجود ندارد.")
             return
-        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب... (ممکن است طول بکشد)")
+        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب... (ممکن است چند لحظه طول بکشد)")
         results = []
         for f in session.files:
             try:
                 urls = await upload_to_github(f["local_path"], f["name"], f.get("caption", ""))
                 if len(urls) == 1:
-                    results.append(f"✅ {f['name']} → [فایل]({urls[0]})")
+                    results.append(f"✅ {f['name']} → [دانلود فایل]({urls[0]})")
                 else:
-                    results.append(f"✅ {f['name']} → {len(urls)-1} قطعه. [منیفست]({urls[-1]})")
+                    results.append(f"✅ {f['name']} → به {len(urls)-1} قطعه تقسیم شد. [منیفست]({urls[-1]})")
+                logger.info(f"✅ آپلود موفق: {f['name']}")
             except Exception as e:
-                logger.error(f"خطا در آپلود {f['name']}: {e}", exc_info=True)
-                results.append(f"❌ {f['name']} – {str(e)}")
-        final = "**نتیجه آپلود:**\n\n" + "\n".join(results)
+                logger.error(f"❌ خطا در آپلود {f['name']}: {e}", exc_info=True)
+                results.append(f"❌ {f['name']} – خطا: {str(e)}")
+        final = "**نتیجهٔ آپلود:**\n\n" + "\n".join(results)
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
         await finish(send_message=True)
 
     elif data == "cancel":
-        await query.edit_message_text("❌ لغو شد.")
+        await query.edit_message_text("❌ عملیات لغو شد. نشست پایان یافت.")
         await finish(send_message=True)
 
     elif data == "remove_last":
@@ -431,7 +455,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(removed["local_path"])
             await update_status(context.bot)
         else:
-            await query.answer("لیست خالی", show_alert=True)
+            await query.answer("لیست فایل‌ها خالی است", show_alert=True)
 
     elif data == "clear_all":
         for f in session.files:
@@ -439,14 +463,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(f["local_path"])
         session.files.clear()
         await update_status(context.bot)
-        await query.answer("همه پاک شدند", show_alert=True)
+        await query.answer("همهٔ فایل‌ها حذف شدند", show_alert=True)
 
-# =========================== راه‌اندازی یوزربات ===========================
+# =========================== راه‌اندازی یوزربات Telethon ===========================
 async def post_init(app: Application):
     session.app = app
-    logger.info("راه‌اندازی یوزربات Telethon...")
+    logger.info("🔌 راه‌اندازی یوزربات Telethon...")
+    
+    # ساخت نشست حافظه‌ای با اطلاعات DC و کلید
     mem = MemorySession()
-    mem.set_dc(DC_ID, '149.154.175.59', 443)
+    mem.set_dc(DC_ID, '149.154.175.59', 443)   # آدرس MTProto رایج
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
     mem.user_id = USER_ID
 
@@ -454,20 +480,26 @@ async def post_init(app: Application):
     await userbot.connect()
     session.userbot = userbot
 
+    # بررسی احراز هویت
     if not await userbot.is_user_authorized():
-        raise ValueError("❌ یوزربات احراز هویت نشد. AUTH_KEY_HEX نامعتبر است.")
+        raise ValueError("❌ یوزربات احراز هویت نشد. AUTH_KEY_HEX نامعتبر یا مربوط به اکانت دیگری است.")
+    
     me = await userbot.get_me()
-    session.me_id = me.id
-    logger.info(f"✅ یوزربات متصل: {me.username or me.first_name} (ID: {me.id})")
-
+    logger.info(f"✅ یوزربات متصل شد: {me.first_name} (@{me.username}) با شناسه {me.id}")
+    if me.id != OWNER_ID:
+        logger.warning(f"⚠️ توجه: شناسه یوزربات ({me.id}) با OWNER_ID ({OWNER_ID}) متفاوت است. مطمئن شوید از یک اکانت استفاده می‌کنید.")
+    
+    # دریافت نام کاربری ربات
     bot_info = await app.bot.get_me()
     if not bot_info.username:
-        raise ValueError("ربات یوزرنیم ندارد. لطفاً با BotFather یوزرنیم تنظیم کنید.")
+        raise ValueError("❌ ربات یوزرنیم ندارد. لطفاً با @BotFather یک یوزرنیم تنظیم کنید.")
     session.bot_username = bot_info.username
-    logger.info(f"ربات @{session.bot_username} آماده است.")
+    logger.info(f"✅ نام کاربری ربات: @{session.bot_username}")
+    
+    # پیام خوش‌آمدگویی به مالک
+    await app.bot.send_message(OWNER_ID, "🤖 ربات با موفقیت فعال شد.\nاز /start برای شروع استفاده کنید.")
 
-    await app.bot.send_message(OWNER_ID, "🤖 ربات فعال است. /start را بزنید.")
-
+# =========================== تابع اصلی ===========================
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.post_init = post_init
@@ -481,7 +513,7 @@ def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("🚀 ربات در حال اجرا (polling)...")
+    logger.info("🚀 ربات در حال اجرا (Polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
