@@ -73,13 +73,14 @@ except Exception as e:
 class Session:
     def __init__(self):
         self.temp_dir = None
-        self.files = []          # هر فایل: {name, size, local_path, caption}
+        self.files = []
         self.status_msg_id = None
         self.chat_id = None
         self.idle_task = None
         self.app = None
         self.userbot = None
-        self.me_id = None        # ایدی عددی یوزربات
+        self.me_id = None
+        self.bot_username = None  # <---- نام کاربری ربات اینجا ذخیره می‌شود
 
 session = Session()
 
@@ -132,6 +133,7 @@ async def finish(send_message: bool = True):
     session.files.clear()
     session.status_msg_id = None
     session.chat_id = None
+    # توجه: bot_username را پاک نمی‌کنیم چون نیاز است
     if send_message and session.app and OWNER_ID:
         try:
             await session.app.bot.send_message(OWNER_ID, "👋 نشست پایان یافت. /start برای شروع مجدد")
@@ -149,10 +151,10 @@ async def download_small_file(file_id: str, name: str, bot):
     logger.info(f"✅ دانلود کوچک (Bot API): {name} ({os.path.getsize(path)} B)")
     return path
 
-async def download_large_file(name: str, message_id: int, chat_id: int):
+async def download_large_file(name: str, message_id: int, chat_entity):
     """
     دانلود فایل بزرگ با یوزربات.
-    chat_id: شناسه عددی چت (در چت خصوصی با ربات، همان id کاربر شماست)
+    chat_entity: نام کاربری ربات (رشته) است.
     """
     if not session.userbot or not session.me_id:
         raise Exception("یوزربات آماده نیست")
@@ -160,29 +162,29 @@ async def download_large_file(name: str, message_id: int, chat_id: int):
 
     # روش اول: با message_id مستقیم
     try:
-        msg = await session.userbot.get_messages(chat_id, ids=message_id)
+        msg = await session.userbot.get_messages(chat_entity, ids=message_id)
         if msg and msg.media:
             await msg.download_media(file=path)
-            logger.info(f"✅ دانلود با یوزربات (آیدی پیام {message_id}) از چت {chat_id}")
+            logger.info(f"✅ دانلود با یوزربات (با شناسه پیام {message_id}) از چت {chat_entity}")
             return path
         else:
-            logger.warning(f"پیام {message_id} در چت {chat_id} یافت نشد یا رسانه ندارد.")
+            logger.warning(f"پیام {message_id} در چت {chat_entity} یافت نشد یا رسانه ندارد.")
     except Exception as e:
         logger.warning(f"خطا در دریافت با message_id {message_id}: {e}")
 
-    # روش دوم: آخرین پیام‌های رسانه‌ای ارسالی توسط خود یوزربات در این چت
+    # روش دوم: آخرین پیام‌ها (با نام کاربری معتبر)
     try:
-        # ۲۰ پیام آخر چت را بگیر
-        messages = await session.userbot.get_messages(chat_id, limit=20)
+        # گرفتن ۲۰ پیام آخر از چت با استفاده از نام کاربری
+        messages = await session.userbot.get_messages(chat_entity, limit=20)
         target = None
-        for m in messages:
-            if m.media and m.sender_id == session.me_id:
-                target = m
+        for msg in messages:
+            if msg.media and msg.sender_id == session.me_id:
+                target = msg
                 break
         if not target:
             raise Exception("هیچ پیام رسانه‌ای از خودتان در این چت یافت نشد.")
         await target.download_media(file=path)
-        logger.info(f"✅ دانلود با یوزربات (آخرین پیام خودتان) از چت {chat_id} (آیدی پیام {target.id})")
+        logger.info(f"✅ دانلود با یوزربات (آخرین پیام خودتان) از چت {chat_entity}")
         return path
     except Exception as e:
         logger.error(f"❌ دانلود با یوزربات شکست خورد: {e}")
@@ -370,8 +372,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if file_size > 20 * 1024 * 1024:
             logger.info(f"فایل بزرگ ({size_str(file_size)}) - استفاده از یوزربات")
-            # نکته مهم: به جای session.bot_entity از msg.chat_id استفاده می‌کنیم
-            local_path = await download_large_file(fname, msg.message_id, msg.chat_id)
+            # 🔥 تغییر مهم: به جای msg.chat_id از session.bot_username استفاده می‌کنیم
+            local_path = await download_large_file(fname, msg.message_id, session.bot_username)
         else:
             logger.info(f"فایل کوچک ({size_str(file_size)}) - Bot API")
             local_path = await download_small_file(file_obj.file_id, fname, context.bot)
@@ -464,7 +466,7 @@ async def post_init(app: Application):
     session.app = app
     logger.info("راه‌اندازی یوزربات Telethon...")
     mem = MemorySession()
-    mem.set_dc(DC_ID, '149.154.175.59', 443)   # آدرس اصلی MTProto
+    mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
     mem.user_id = USER_ID
 
@@ -478,11 +480,12 @@ async def post_init(app: Application):
     session.me_id = me.id
     logger.info(f"✅ یوزربات متصل: {me.username or me.first_name} (ID: {me.id})")
 
-    # (اختیاری) برای اطمینان از اینکه ربات یوزرنیم دارد
+    # گرفتن و ذخیره‌سازی نام کاربری ربات
     bot_info = await app.bot.get_me()
     if not bot_info.username:
         raise ValueError("ربات یوزرنیم ندارد. لطفاً با BotFather یوزرنیم تنظیم کنید.")
-    logger.info(f"ربات @{bot_info.username} آماده است.")
+    session.bot_username = bot_info.username
+    logger.info(f"ربات @{session.bot_username} آماده است.")
 
     await app.bot.send_message(OWNER_ID, "🤖 ربات فعال است. /start را بزنید.")
 
