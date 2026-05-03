@@ -72,7 +72,7 @@ class Session:
         self.userbot = None
         self.bot_username = None
         self.is_active = False
-        self.repo_dir = None   # دایرکتوری مخزن گیت
+        self.repo_dir = None
 
 session = Session()
 
@@ -171,13 +171,12 @@ async def download_large_file(name: str, progress_msg):
     if not found_media:
         raise Exception("فایل یافت نشد")
 
+    # شروع دانلود با پیشرفت
     file_size = found_media.file.size
-    downloaded = 0
     last_percent = 0
 
     async def progress_callback(current, total):
-        nonlocal downloaded, last_percent
-        downloaded = current
+        nonlocal last_percent
         percent = int((current / total) * 100)
         if percent > last_percent:
             last_percent = percent
@@ -190,67 +189,69 @@ async def download_large_file(name: str, progress_msg):
     logger.info(f"✅ دانلود بزرگ: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-# ========== آپلود به گیت‌هاب با استفاده از Git (مقاوم در برابر خطاهای 500) ==========
+# ========== آپلود با Git ==========
 async def upload_to_github_with_git(local_path: str, orig_name: str, caption_text: str = "", progress_msg=None):
-    """
-    آپلود فایل با استفاده از Git push (مشابه ir-downloader)
-    کاملاً پایدار برای فایل‌های بزرگ، بدون خطای 500
-    """
     remote_url = f"https://{GH_TOKEN}@github.com/{REPO_NAME}.git"
     
-    # مسیر ذخیره مخزن در دایرکتوری موقت
     if session.repo_dir is None:
         session.repo_dir = os.path.join(session.temp_dir, "github_repo")
     
-    # اگر مخزن وجود نداشت، clone کن
+    # Clone یا pull مخزن
     if not os.path.exists(session.repo_dir):
         if progress_msg:
-            await progress_msg.edit_text("📥 در حال clone کردن مخزن گیت‌هاب...")
+            await progress_msg.edit_text("📥 در حال clone مخزن گیت‌هاب...")
         repo = git.Repo.clone_from(remote_url, session.repo_dir, branch="main", depth=1)
     else:
         repo = git.Repo(session.repo_dir)
-        # ریست کردن هر تغییر محلی و دریافت آخرین تغییرات
         repo.git.reset("--hard")
         repo.git.clean("-fd")
         if progress_msg:
-            await progress_msg.edit_text("🔄 در حال به‌روزرسانی مخزن محلی...")
+            await progress_msg.edit_text("🔄 به‌روزرسانی مخزن محلی...")
         repo.remotes.origin.pull()
 
-    # آماده‌سازی پوشه هدف در مخزن
-    base = os.path.splitext(orig_name)[0]
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target_folder = os.path.join(session.repo_dir, "uploads", f"{base}_{timestamp}")
-    os.makedirs(target_folder, exist_ok=True)
+    # ساختار مرتب با تاریخ
+    now = datetime.now()
+    date_path = now.strftime("%Y/%m/%d")
+    base_name = os.path.splitext(orig_name)[0]
+    timestamp = now.strftime("%H%M%S")
+    final_folder_name = f"{base_name}_{timestamp}"
+    
+    folder_in_repo = os.path.join(session.repo_dir, "uploads", date_path, final_folder_name)
+    os.makedirs(folder_in_repo, exist_ok=True)
 
     # کپی فایل اصلی
-    dest_file = os.path.join(target_folder, orig_name)
+    dest_file = os.path.join(folder_in_repo, orig_name)
     shutil.copy2(local_path, dest_file)
 
-    # کپی فایل کپشن در صورت وجود
+    # کپی کپشن
     if caption_text.strip():
-        cap_path = os.path.join(target_folder, f"{orig_name}.caption.txt")
+        cap_path = os.path.join(folder_in_repo, f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
     # Commit و Push
     if progress_msg:
-        await progress_msg.edit_text(f"📤 در حال commit و push فایل {orig_name}...")
+        await progress_msg.edit_text(f"📤 در حال commit و push...")
     repo.index.add("*")
-    repo.index.commit(f"Upload {orig_name} at {timestamp}")
-    repo.remotes.origin.push()
+    commit_msg = f"Add {orig_name} at {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    repo.index.commit(commit_msg)
+    
+    # تلاش مجدد برای push
+    for attempt in range(3):
+        try:
+            repo.remotes.origin.push()
+            break
+        except Exception as e:
+            if attempt < 2:
+                logger.warning(f"⚠️ خطا در push، تلاش مجدد {attempt+2}")
+                await asyncio.sleep(3)
+            else:
+                raise
 
-    # ساخت لینک دانلود
-    file_url = f"https://raw.githubusercontent.com/{REPO_NAME}/main/uploads/{base}_{timestamp}/{orig_name}"
-    urls = [file_url]
-
-    # برای کپشن هم لینک بساز
-    if caption_text.strip():
-        caption_url = f"https://raw.githubusercontent.com/{REPO_NAME}/main/uploads/{base}_{timestamp}/{orig_name}.caption.txt"
-        urls.append(caption_url)
-
+    relative_path = f"uploads/{date_path}/{final_folder_name}/{orig_name}"
     if progress_msg:
         await progress_msg.delete()
-    return urls
+    return relative_path
 
 # ========== هندلرهای ربات ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,12 +266,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = update.effective_chat.id
     await update.message.reply_text(
-        "🚀 **آپلودر تلگرام → گیت‌هاب (با Git)**\n\n"
+        "🚀 **آپلودر تلگرام → گیت‌هاب (ساختار مرتب)**\n\n"
         "✅ فایل خود را ارسال کنید.\n"
+        "📂 ساختار ذخیره‌سازی: `uploads/سال/ماه/روز/نام فایل_زمان/`\n"
         "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
-        "🔹 فایل‌های بزرگ بدون مشکل و با سرعت بالا آپلود می‌شوند.\n"
-        "🔹 پس از هر فایل، دکمه‌ها به‌روز می‌شوند.\n"
-        "🔹 بی‌کاری ۱۵ دقیقه → پایان خودکار.\n\n"
+        "🔹 آپلود با Git (پایدار و بدون خطای 500)\n"
+        "🔹 برای دانلود فایل‌ها، کل مخزن را به صورت ZIP از گیت‌هاب دریافت کنید.\n\n"
         "_فقط شما مجاز هستید._",
         parse_mode="Markdown"
     )
@@ -382,22 +383,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not session.files:
             await query.edit_message_text("❌ هیچ فایلی برای آپلود نیست.")
             return
-        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب با Git...")
+        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب... (با Git)")
         results = []
         for f in session.files:
             progress_msg = await context.bot.send_message(session.chat_id, f"🔄 شروع آپلود {f['name']}...")
             try:
-                urls = await upload_to_github_with_git(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
-                if len(urls) >= 1:
-                    results.append(f"✅ {f['name']} → [فایل]({urls[0]})")
-                if len(urls) > 1:
-                    results.append(f"📝 کپشن → [متن]({urls[1]})")
-                logger.info(f"✅ آپلود موفق: {f['name']}")
+                relative_path = await upload_to_github_with_git(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
+                results.append(f"✅ {f['name']} → ذخیره شد در: `{relative_path}`")
+                logger.info(f"✅ آپلود موفق: {f['name']} -> {relative_path}")
             except Exception as e:
                 logger.error(f"❌ خطا در آپلود {f['name']}: {e}", exc_info=True)
                 results.append(f"❌ {f['name']} – خطا: {str(e)}")
                 await progress_msg.edit_text(f"❌ خطا در آپلود {f['name']}")
-        final = "**نتیجهٔ آپلود:**\n\n" + "\n".join(results)
+        final = "**نتیجهٔ آپلود:**\n\n" + "\n".join(results) + "\n\n📌 **نحوه دانلود:** به مخزن گیت‌هاب بروید، روی دکمه `Code` کلیک کرده و `Download ZIP` را انتخاب کنید. سپس فایل مورد نظر را از داخل پوشه uploads استخراج کنید."
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
         await finish(send_message=True)
 
