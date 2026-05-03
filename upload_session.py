@@ -8,7 +8,6 @@ import json
 import math
 from datetime import datetime
 
-# ========== 1. کتابخانه‌های خارجی ==========
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -17,11 +16,11 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
+    from telethon.tl.types import PeerUser
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
 
-# ========== 2. متغیرهای محیطی ==========
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 OWNER_ID        = os.getenv("OWNER_ID")
 GH_TOKEN        = os.getenv("GH_TOKEN")
@@ -40,10 +39,7 @@ try:
 except ValueError:
     OWNER_ID = API_ID = DC_ID = USER_ID = 0
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 logger.info("========== بررسی متغیرهای محیطی ==========")
@@ -60,7 +56,6 @@ logger.info(f"USER_ID: {USER_ID}")
 if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, DC_ID, AUTH_KEY_HEX, USER_ID]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
-# ========== 3. اتصال به گیت‌هاب ==========
 try:
     auth = Auth.Token(GH_TOKEN)
     github = Github(auth=auth)
@@ -70,7 +65,6 @@ except Exception as e:
     logger.error(f"GitHub connection error: {e}")
     raise
 
-# ========== 4. کلاس جلسه ==========
 class Session:
     def __init__(self):
         self.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
@@ -80,11 +74,10 @@ class Session:
         self.last_message_id = None
         self.idle_task = None
         self.app = None
-        self.userbot = None   # Telethon client
+        self.userbot = None
 
 session = Session()
 
-# ========== 5. توابع کمکی ==========
 def size_str(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024:
@@ -116,7 +109,6 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
-    """Bot API برای فایل≤20MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -124,11 +116,17 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
-    """Telethon userbot برای فایل >20MB"""
     if not session.userbot:
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
-    message = await session.userbot.get_messages(session.chat_id, ids=session.last_message_id)
+
+    # رفع مشکل PeerUser
+    try:
+        entity = await session.userbot.get_input_entity(session.chat_id)
+    except ValueError:
+        entity = PeerUser(session.chat_id)
+
+    message = await session.userbot.get_messages(entity, ids=session.last_message_id)
     if not message:
         raise Exception("Message not found via userbot")
     await message.download_media(file=path)
@@ -266,7 +264,6 @@ async def finish():
     if session.app:
         await session.app.stop()
 
-# ========== 6. هندلرها ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
@@ -428,9 +425,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی در post_init ==========
 async def post_init(app: Application):
-    # راه‌اندازی Telethon userbot
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -441,10 +436,8 @@ async def post_init(app: Application):
     session.userbot = userbot
     logger.info("✅ Telethon userbot started")
 
-    # ارسال پیام شروع
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
-# ========== 8. تابع اصلی همگام ==========
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
