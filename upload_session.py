@@ -80,7 +80,7 @@ class Session:
         self.last_message_id = None
         self.idle_task = None
         self.app = None
-        self.userbot = None
+        self.userbot = None   # Telethon client
 
 session = Session()
 
@@ -116,6 +116,7 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
+    """Bot API برای فایل≤20MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -123,6 +124,7 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
+    """Telethon userbot برای فایل >20MB"""
     if not session.userbot:
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
@@ -426,15 +428,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی یوزربات با MemorySession و AuthKey ==========
+# ========== 7. راه‌اندازی در post_init ==========
 async def post_init(app: Application):
-    await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
-
-async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    session.app = app
-
-    # MemorySession + AuthKey (اصلاح‌شده)
+    # راه‌اندازی Telethon userbot
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -443,8 +439,15 @@ async def main():
     userbot = TelegramClient(mem, API_ID, API_HASH)
     await userbot.connect()
     session.userbot = userbot
-    logger.info("✅ Telethon userbot started (MemorySession + AuthKey)")
+    logger.info("✅ Telethon userbot started")
 
+    # ارسال پیام شروع
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
+
+# ========== 8. تابع اصلی همگام ==========
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    session.app = app
     app.post_init = post_init
 
     app.add_handler(CommandHandler("start", start))
@@ -457,7 +460,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("Starting polling...")
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
