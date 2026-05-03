@@ -15,25 +15,29 @@ try:
     from github import Github, Auth
     from github.GithubException import GithubException
     from telethon import TelegramClient
-    from telethon.sessions import StringSession
+    from telethon.sessions import MemorySession
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
 
 # ========== 2. متغیرهای محیطی ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
-GH_TOKEN = os.getenv("GH_TOKEN")
-REPO_NAME = os.getenv("REPO_NAME")
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+BOT_TOKEN       = os.getenv("BOT_TOKEN")
+OWNER_ID        = os.getenv("OWNER_ID")
+GH_TOKEN        = os.getenv("GH_TOKEN")
+REPO_NAME       = os.getenv("REPO_NAME")
+API_ID          = os.getenv("API_ID")
+API_HASH        = os.getenv("API_HASH")
+DC_ID           = os.getenv("DC_ID")
+AUTH_KEY_HEX    = os.getenv("AUTH_KEY_HEX")
+USER_ID         = os.getenv("USER_ID")
 
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
     API_ID = int(API_ID) if API_ID else 0
+    DC_ID = int(DC_ID) if DC_ID else 0
+    USER_ID = int(USER_ID) if USER_ID else 0
 except ValueError:
-    OWNER_ID = API_ID = 0
+    OWNER_ID = API_ID = DC_ID = USER_ID = 0
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -48,9 +52,11 @@ logger.info(f"GH_TOKEN: {'OK' if GH_TOKEN else 'Missing'}")
 logger.info(f"REPO_NAME: {REPO_NAME}")
 logger.info(f"API_ID: {API_ID}")
 logger.info(f"API_HASH: {'OK' if API_HASH else 'Missing'}")
-logger.info(f"SESSION_STRING: {'OK' if SESSION_STRING else 'Missing'}")
+logger.info(f"DC_ID: {DC_ID}")
+logger.info(f"AUTH_KEY_HEX: {'OK' if AUTH_KEY_HEX else 'Missing'}")
+logger.info(f"USER_ID: {USER_ID}")
 
-if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, SESSION_STRING]):
+if not all([BOT_TOKEN, OWNER_ID, GH_TOKEN, REPO_NAME, API_ID, API_HASH, DC_ID, AUTH_KEY_HEX, USER_ID]):
     raise ValueError("❌ متغیرهای محیطی کامل نیستند!")
 
 # ========== 3. اتصال به گیت‌هاب ==========
@@ -109,7 +115,6 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
-    """Bot API برای فایل≤20MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -117,7 +122,6 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
-    """Telethon userbot برای فایل >20MB"""
     if not session.userbot:
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
@@ -421,19 +425,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی ==========
+# ========== 7. راه‌اندازی یوزربات با MemorySession ==========
 async def post_init(app: Application):
-    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot via Session String). Send me files or use /start")
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot via MemorySession). Send me files or use /start")
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
 
-    # *** استفاده از StringSession به جای فایل سشن فیزیکی ***
-    userbot = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-    await userbot.start()
+    # ساخت MemorySession و پر کردن دستی اطلاعات
+    mem = MemorySession()
+    mem.set_dc(DC_ID, '149.154.175.59', 443)   # آدرس سرور اصلی تلگرام، درست برای dc=1
+    mem.auth_key = bytes.fromhex(AUTH_KEY_HEX)
+    mem.user_id = USER_ID
+
+    userbot = TelegramClient(mem, API_ID, API_HASH)
+    await userbot.connect()          # فقط connect بدون start (نیاز به احراز هویت ندارد)
     session.userbot = userbot
-    logger.info("✅ Telethon userbot started (StringSession)")
+    logger.info("✅ Telethon userbot started (MemorySession)")
 
     app.post_init = post_init
 
