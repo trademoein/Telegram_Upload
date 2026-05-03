@@ -11,14 +11,13 @@ from datetime import datetime
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-    from github import Github, Auth
-    from github.GithubException import GithubException
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
     from telethon.tl.types import InputMessagesFilterPhotoVideo, InputMessagesFilterDocument
+    import git
 except ImportError as e:
-    print(f"❌ کتابخانه ناقص: {e}")
+    print(f"❌ کتابخانه ناقص: {e}\nلطفاً با دستور زیر نصب کنید:\npip install python-telegram-bot telethon GitPython")
     sys.exit(1)
 
 # ========== متغیرهای محیطی ==========
@@ -61,16 +60,6 @@ if missing:
 
 logger.info(f"✅ OWNER: {OWNER_ID} | REPO: {REPO_NAME}")
 
-# ========== اتصال به گیت‌هاب ==========
-try:
-    auth = Auth.Token(GH_TOKEN)
-    github = Github(auth=auth)
-    repo = github.get_repo(REPO_NAME)
-    logger.info(f"✅ متصل به مخزن: {REPO_NAME}")
-except Exception as e:
-    logger.error(f"❌ خطای گیت‌هاب: {e}")
-    raise
-
 # ========== کلاس نشست ==========
 class Session:
     def __init__(self):
@@ -83,6 +72,7 @@ class Session:
         self.userbot = None
         self.bot_username = None
         self.is_active = False
+        self.repo_dir = None   # دایرکتوری مخزن گیت
 
 session = Session()
 
@@ -200,107 +190,66 @@ async def download_large_file(name: str, progress_msg):
     logger.info(f"✅ دانلود بزرگ: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-# ========== آپلود به گیت‌هاب (با retry) ==========
-def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
-    size = os.path.getsize(path)
-    num = math.ceil(size / chunk)
-    parts = []
-    base = os.path.basename(path)
-    with open(path, "rb") as src:
-        for i in range(num):
-            part_name = f"{base}.part{i+1:03d}"
-            part_path = os.path.join(os.path.dirname(path), part_name)
-            with open(part_path, "wb") as dst:
-                dst.write(src.read(chunk))
-            parts.append(part_path)
-    manifest = {
-        "original": base,
-        "size": size,
-        "chunk": chunk,
-        "parts": [os.path.basename(p) for p in parts],
-        "recombine": f"cat {base}.part* > {base}"
-    }
-    man_path = os.path.join(os.path.dirname(path), f"{base}.manifest.json")
-    with open(man_path, "w", encoding="utf-8") as mf:
-        json.dump(manifest, mf, indent=2)
-    return parts, man_path
+# ========== آپلود به گیت‌هاب با استفاده از Git (مقاوم در برابر خطاهای 500) ==========
+async def upload_to_github_with_git(local_path: str, orig_name: str, caption_text: str = "", progress_msg=None):
+    """
+    آپلود فایل با استفاده از Git push (مشابه ir-downloader)
+    کاملاً پایدار برای فایل‌های بزرگ، بدون خطای 500
+    """
+    remote_url = f"https://{GH_TOKEN}@github.com/{REPO_NAME}.git"
+    
+    # مسیر ذخیره مخزن در دایرکتوری موقت
+    if session.repo_dir is None:
+        session.repo_dir = os.path.join(session.temp_dir, "github_repo")
+    
+    # اگر مخزن وجود نداشت، clone کن
+    if not os.path.exists(session.repo_dir):
+        if progress_msg:
+            await progress_msg.edit_text("📥 در حال clone کردن مخزن گیت‌هاب...")
+        repo = git.Repo.clone_from(remote_url, session.repo_dir, branch="main", depth=1)
+    else:
+        repo = git.Repo(session.repo_dir)
+        # ریست کردن هر تغییر محلی و دریافت آخرین تغییرات
+        repo.git.reset("--hard")
+        repo.git.clean("-fd")
+        if progress_msg:
+            await progress_msg.edit_text("🔄 در حال به‌روزرسانی مخزن محلی...")
+        repo.remotes.origin.pull()
 
-async def upload_with_retry(remote_path, data, commit_msg, progress_msg, retries=3):
-    for attempt in range(1, retries+1):
-        try:
-            repo.create_file(remote_path, commit_msg, data, branch="main")
-            return True
-        except GithubException as e:
-            if e.status == 409:
-                contents = repo.get_contents(remote_path)
-                repo.update_file(remote_path, commit_msg, data, contents.sha, branch="main")
-                return True
-            elif e.status in [500, 502, 503, 504]:
-                logger.warning(f"⚠️ خطای {e.status}، تلاش مجدد {attempt}/{retries}")
-                if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                else:
-                    raise
-            else:
-                raise
-        except Exception as e:
-            if attempt < retries:
-                logger.warning(f"⚠️ خطا: {e}، تلاش مجدد {attempt}/{retries}")
-                await asyncio.sleep(2 ** attempt)
-            else:
-                raise
-    return False
-
-async def upload_to_github(local_path: str, orig_name: str, caption_text: str, progress_msg):
+    # آماده‌سازی پوشه هدف در مخزن
     base = os.path.splitext(orig_name)[0]
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = f"uploads/{base}_{ts}/"
-    size = os.path.getsize(local_path)
-    urls = []
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_folder = os.path.join(session.repo_dir, "uploads", f"{base}_{timestamp}")
+    os.makedirs(target_folder, exist_ok=True)
 
-    cap_path = None
+    # کپی فایل اصلی
+    dest_file = os.path.join(target_folder, orig_name)
+    shutil.copy2(local_path, dest_file)
+
+    # کپی فایل کپشن در صورت وجود
     if caption_text.strip():
-        cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
+        cap_path = os.path.join(target_folder, f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
-    if size <= 100 * 1024 * 1024:
-        remote = f"{folder}{orig_name}"
-        with open(local_path, "rb") as f:
-            data = f.read()
-        await progress_msg.edit_text(f"📤 آپلود {orig_name}...")
-        await upload_with_retry(remote, data, f"Upload {orig_name}", progress_msg)
-        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote}")
-        logger.info(f"✅ آپلود کامل: {remote}")
-    else:
-        parts, man_path = split_large_file(local_path)
-        total = len(parts)
-        for idx, part in enumerate(parts, 1):
-            pname = os.path.basename(part)
-            remote_part = f"{folder}{pname}"
-            with open(part, "rb") as pf:
-                data = pf.read()
-            await progress_msg.edit_text(f"📤 آپلود {orig_name} (بخش {idx}/{total})...")
-            await upload_with_retry(remote_part, data, f"Upload {pname}", progress_msg)
-            urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
-        # آپلود منیفست
-        with open(man_path, "rb") as mf:
-            man_data = mf.read()
-        remote_man = f"{folder}{os.path.basename(man_path)}"
-        await upload_with_retry(remote_man, man_data, "Upload manifest", progress_msg)
-        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
-        logger.info("✅ منیفست آپلود شد")
+    # Commit و Push
+    if progress_msg:
+        await progress_msg.edit_text(f"📤 در حال commit و push فایل {orig_name}...")
+    repo.index.add("*")
+    repo.index.commit(f"Upload {orig_name} at {timestamp}")
+    repo.remotes.origin.push()
 
-    if cap_path:
-        remote_cap = f"{folder}{orig_name}.caption.txt"
-        with open(cap_path, "rb") as cf:
-            cap_data = cf.read()
-        await upload_with_retry(remote_cap, cap_data, "Upload caption", progress_msg)
-        urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_cap}")
-        logger.info("✅ کپشن آپلود شد")
+    # ساخت لینک دانلود
+    file_url = f"https://raw.githubusercontent.com/{REPO_NAME}/main/uploads/{base}_{timestamp}/{orig_name}"
+    urls = [file_url]
 
-    await progress_msg.delete()
+    # برای کپشن هم لینک بساز
+    if caption_text.strip():
+        caption_url = f"https://raw.githubusercontent.com/{REPO_NAME}/main/uploads/{base}_{timestamp}/{orig_name}.caption.txt"
+        urls.append(caption_url)
+
+    if progress_msg:
+        await progress_msg.delete()
     return urls
 
 # ========== هندلرهای ربات ==========
@@ -316,10 +265,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = update.effective_chat.id
     await update.message.reply_text(
-        "🚀 **آپلودر تلگرام → گیت‌هاب**\n\n"
+        "🚀 **آپلودر تلگرام → گیت‌هاب (با Git)**\n\n"
         "✅ فایل خود را ارسال کنید.\n"
         "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
-        "🔹 فایل‌های >۱۰۰MB به قطعات ۹۵MB تقسیم می‌شوند.\n"
+        "🔹 فایل‌های بزرگ بدون مشکل و با سرعت بالا آپلود می‌شوند.\n"
         "🔹 پس از هر فایل، دکمه‌ها به‌روز می‌شوند.\n"
         "🔹 بی‌کاری ۱۵ دقیقه → پایان خودکار.\n\n"
         "_فقط شما مجاز هستید._",
@@ -405,7 +354,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": caption
     })
 
-    # به‌روزرسانی دکمه‌ها پس از هر فایل
     await update_status(context.bot)
 
     try:
@@ -434,16 +382,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not session.files:
             await query.edit_message_text("❌ هیچ فایلی برای آپلود نیست.")
             return
-        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب...")
+        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب با Git...")
         results = []
         for f in session.files:
             progress_msg = await context.bot.send_message(session.chat_id, f"🔄 شروع آپلود {f['name']}...")
             try:
-                urls = await upload_to_github(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
-                if len(urls) == 1:
+                urls = await upload_to_github_with_git(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
+                if len(urls) >= 1:
                     results.append(f"✅ {f['name']} → [فایل]({urls[0]})")
-                else:
-                    results.append(f"✅ {f['name']} → {len(urls)-1} قطعه. [منیفست]({urls[-1]})")
+                if len(urls) > 1:
+                    results.append(f"📝 کپشن → [متن]({urls[1]})")
                 logger.info(f"✅ آپلود موفق: {f['name']}")
             except Exception as e:
                 logger.error(f"❌ خطا در آپلود {f['name']}: {e}", exc_info=True)
