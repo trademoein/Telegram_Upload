@@ -16,6 +16,7 @@ try:
     from github.GithubException import GithubException
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
+    from telethon.crypto import AuthKey
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
@@ -79,7 +80,7 @@ class Session:
         self.last_message_id = None
         self.idle_task = None
         self.app = None
-        self.userbot = None   # Telethon client
+        self.userbot = None
 
 session = Session()
 
@@ -425,24 +426,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("All cleared")
 
-# ========== 7. راه‌اندازی یوزربات با MemorySession ==========
+# ========== 7. راه‌اندازی یوزربات با MemorySession و AuthKey ==========
 async def post_init(app: Application):
-    await app.bot.send_message(OWNER_ID, "🤖 Bot is active (Telethon userbot via MemorySession). Send me files or use /start")
+    await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
     session.app = app
 
-    # ساخت MemorySession و پر کردن دستی اطلاعات
+    # MemorySession + AuthKey (اصلاح‌شده)
     mem = MemorySession()
-    mem.set_dc(DC_ID, '149.154.175.59', 443)   # آدرس سرور اصلی تلگرام، درست برای dc=1
-    mem.auth_key = bytes.fromhex(AUTH_KEY_HEX)
+    mem.set_dc(DC_ID, '149.154.175.59', 443)
+    mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
     mem.user_id = USER_ID
 
     userbot = TelegramClient(mem, API_ID, API_HASH)
-    await userbot.connect()          # فقط connect بدون start (نیاز به احراز هویت ندارد)
+    await userbot.connect()
     session.userbot = userbot
-    logger.info("✅ Telethon userbot started (MemorySession)")
+    logger.info("✅ Telethon userbot started (MemorySession + AuthKey)")
 
     app.post_init = post_init
 
