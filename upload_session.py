@@ -6,7 +6,6 @@ import asyncio
 import logging
 import json
 import math
-import time
 from datetime import datetime
 
 try:
@@ -22,7 +21,7 @@ except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}")
     sys.exit(1)
 
-# ========== متغیرهای محیطی (یک اکانت) ==========
+# ========== متغیرهای محیطی ==========
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 OWNER_ID        = os.getenv("OWNER_ID")
 GH_TOKEN        = os.getenv("GH_TOKEN")
@@ -201,7 +200,7 @@ async def download_large_file(name: str, progress_msg):
     logger.info(f"✅ دانلود بزرگ: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-# ========== آپلود به گیت‌هاب با retry ==========
+# ========== آپلود به گیت‌هاب (با retry) ==========
 def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
     size = os.path.getsize(path)
     num = math.ceil(size / chunk)
@@ -219,31 +218,27 @@ def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
         "size": size,
         "chunk": chunk,
         "parts": [os.path.basename(p) for p in parts],
-        "recombine_linux": f"cat {base}.part* > {base}",
-        "recombine_windows": f"copy /b {base}.part* {base}"
+        "recombine": f"cat {base}.part* > {base}"
     }
     man_path = os.path.join(os.path.dirname(path), f"{base}.manifest.json")
     with open(man_path, "w", encoding="utf-8") as mf:
         json.dump(manifest, mf, indent=2)
     return parts, man_path
 
-async def upload_to_github_with_retry(remote_path, data, commit_msg, progress_msg, retries=3):
+async def upload_with_retry(remote_path, data, commit_msg, progress_msg, retries=3):
     for attempt in range(1, retries+1):
         try:
             repo.create_file(remote_path, commit_msg, data, branch="main")
-            logger.info(f"✅ آپلود موفق: {remote_path} (تلاش {attempt})")
             return True
         except GithubException as e:
             if e.status == 409:
-                # فایل وجود دارد -> آپدیت
                 contents = repo.get_contents(remote_path)
                 repo.update_file(remote_path, commit_msg, data, contents.sha, branch="main")
-                logger.info(f"✅ آپدیت موفق: {remote_path}")
                 return True
-            elif e.status in [500, 502, 503, 504]:  # خطاهای سرور گیت‌هاب
-                logger.warning(f"⚠️ خطای {e.status} در آپلود {remote_path}، تلاش {attempt}/{retries}")
+            elif e.status in [500, 502, 503, 504]:
+                logger.warning(f"⚠️ خطای {e.status}، تلاش مجدد {attempt}/{retries}")
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)  # 2,4,8 ثانیه
+                    await asyncio.sleep(2 ** attempt)
                     continue
                 else:
                     raise
@@ -270,31 +265,30 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str, p
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
-    # آپلود فایل یا قطعات
     if size <= 100 * 1024 * 1024:
         remote = f"{folder}{orig_name}"
         with open(local_path, "rb") as f:
             data = f.read()
-        await progress_msg.edit_text(f"📤 آپلود {orig_name} به گیت‌هاب...")
-        await upload_to_github_with_retry(remote, data, f"Upload {orig_name}", progress_msg)
+        await progress_msg.edit_text(f"📤 آپلود {orig_name}...")
+        await upload_with_retry(remote, data, f"Upload {orig_name}", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote}")
         logger.info(f"✅ آپلود کامل: {remote}")
     else:
         parts, man_path = split_large_file(local_path)
-        total_parts = len(parts)
+        total = len(parts)
         for idx, part in enumerate(parts, 1):
             pname = os.path.basename(part)
             remote_part = f"{folder}{pname}"
             with open(part, "rb") as pf:
                 data = pf.read()
-            await progress_msg.edit_text(f"📤 آپلود {orig_name} (قطعه {idx}/{total_parts})...")
-            await upload_to_github_with_retry(remote_part, data, f"Upload {pname}", progress_msg)
+            await progress_msg.edit_text(f"📤 آپلود {orig_name} (بخش {idx}/{total})...")
+            await upload_with_retry(remote_part, data, f"Upload {pname}", progress_msg)
             urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
         # آپلود منیفست
         with open(man_path, "rb") as mf:
             man_data = mf.read()
         remote_man = f"{folder}{os.path.basename(man_path)}"
-        await upload_to_github_with_retry(remote_man, man_data, "Upload manifest", progress_msg)
+        await upload_with_retry(remote_man, man_data, "Upload manifest", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
         logger.info("✅ منیفست آپلود شد")
 
@@ -302,7 +296,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str, p
         remote_cap = f"{folder}{orig_name}.caption.txt"
         with open(cap_path, "rb") as cf:
             cap_data = cf.read()
-        await upload_to_github_with_retry(remote_cap, cap_data, "Upload caption", progress_msg)
+        await upload_with_retry(remote_cap, cap_data, "Upload caption", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_cap}")
         logger.info("✅ کپشن آپلود شد")
 
@@ -411,6 +405,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": caption
     })
 
+    # به‌روزرسانی دکمه‌ها پس از هر فایل
     await update_status(context.bot)
 
     try:
