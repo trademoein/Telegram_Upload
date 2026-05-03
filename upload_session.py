@@ -122,13 +122,17 @@ async def download_large_file(name):
         raise Exception("Userbot or bot entity not initialized")
     path = os.path.join(session.temp_dir, name)
 
-    # به‌دست آوردن مستقیم پیام از طریق شناسه آن (message_id)
-    message = await session.userbot.get_messages(session.bot_entity, ids=session.last_message_id)
-    if not message:
-        raise Exception("Message not found via userbot (ID mismatch)")
-    if not message.media:
-        raise Exception("Message found, but no media attached")
-    await message.download_media(file=path)
+    # دریافت ۵ پیام آخر چت با ربات
+    messages = await session.userbot.get_messages(session.bot_entity, limit=5)
+    # پیدا کردن آخرین پیام حاوی رسانه که توسط خود کاربر (userbot) فرستاده شده باشد
+    target = None
+    for msg in messages:
+        if msg.media and msg.sender_id == session.userbot.me.id:
+            target = msg
+            break
+    if not target:
+        raise Exception("No media message from user found in recent chat with bot")
+    await target.download_media(file=path)
     logger.info(f"Userbot downloaded: {name} ({os.path.getsize(path)} B)")
     return path
 
@@ -425,7 +429,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("All cleared")
 
 async def post_init(app: Application):
-    # راه‌اندازی کلاینت Telethon با بررسی سلامت اتصال
+    # راه‌اندازی کلاینت Telethon
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -435,10 +439,8 @@ async def post_init(app: Application):
     await userbot.connect()
     session.userbot = userbot
 
-    # --- بررسی سلامت اتصال ---
     if not await userbot.is_user_authorized():
-        logger.error("❌ Userbot not authorized – auth_key may be invalid")
-        raise ValueError("Invalid session: userbot not authorized")
+        raise ValueError("Userbot not authorized")
     me = await userbot.get_me()
     logger.info(f"✅ Userbot authorized as {me.username or me.first_name} (ID: {me.id})")
 
