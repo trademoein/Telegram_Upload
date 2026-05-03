@@ -119,9 +119,10 @@ async def download_large_file(name):
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
 
-    # entity مالک قبلاً در post_init کش شده، مستقیم دریافت می‌کنیم
-    entity = await session.userbot.get_input_entity(OWNER_ID)
-    message = await session.userbot.get_messages(entity, ids=session.last_message_id)
+    # گرفتن اطلاعات self (خود userbot) برای کش کردن entity
+    me = await session.userbot.get_me()
+    # حالا می‌توانیم پیام‌ها را از چت خود userbot (که همان مالک است) دریافت کنیم
+    message = await session.userbot.get_messages(me, ids=session.last_message_id)
     if not message:
         raise Exception("Message not found via userbot")
     await message.download_media(file=path)
@@ -421,6 +422,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("All cleared")
 
 async def post_init(app: Application):
+    # ساخت اتصال userbot با MemorySession
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -430,11 +432,9 @@ async def post_init(app: Application):
     await userbot.connect()
     session.userbot = userbot
 
-    # کش کردن entity کاربر مالک (OWNER_ID)
-    await userbot.get_entity(OWNER_ID)
-
     logger.info("✅ Telethon userbot started")
 
+    # ارسال پیام شروع
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
 def main():
