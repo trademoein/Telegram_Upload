@@ -109,6 +109,7 @@ async def update_status(bot):
         logger.error(f"update_status error: {e}")
 
 async def download_small_file(file_id, name, bot):
+    """Bot API برای فایل ≤ 20 MB"""
     path = os.path.join(session.temp_dir, name)
     f = await bot.get_file(file_id)
     await f.download_to_drive(path)
@@ -116,15 +117,17 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
+    """Telethon userbot برای فایل > 20 MB"""
     if not session.userbot or not session.bot_entity:
         raise Exception("Userbot or bot entity not initialized")
     path = os.path.join(session.temp_dir, name)
 
-    # دریافت آخرین پیام از چت بین userbot و ربات (که همان فایل ارسالی است)
-    messages = await session.userbot.get_messages(session.bot_entity, limit=1)
-    if not messages or not messages[0].media:
-        raise Exception("No recent media message found via userbot")
-    message = messages[0]
+    # به‌دست آوردن مستقیم پیام از طریق شناسه آن (message_id)
+    message = await session.userbot.get_messages(session.bot_entity, ids=session.last_message_id)
+    if not message:
+        raise Exception("Message not found via userbot (ID mismatch)")
+    if not message.media:
+        raise Exception("Message found, but no media attached")
     await message.download_media(file=path)
     logger.info(f"Userbot downloaded: {name} ({os.path.getsize(path)} B)")
     return path
@@ -422,7 +425,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("All cleared")
 
 async def post_init(app: Application):
-    # اتصال userbot
+    # راه‌اندازی کلاینت Telethon با بررسی سلامت اتصال
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -432,11 +435,18 @@ async def post_init(app: Application):
     await userbot.connect()
     session.userbot = userbot
 
-    # دریافت اطلاعات ربات و ذخیره entity آن
+    # --- بررسی سلامت اتصال ---
+    if not await userbot.is_user_authorized():
+        logger.error("❌ Userbot not authorized – auth_key may be invalid")
+        raise ValueError("Invalid session: userbot not authorized")
+    me = await userbot.get_me()
+    logger.info(f"✅ Userbot authorized as {me.username or me.first_name} (ID: {me.id})")
+
+    # ذخیره entity ربات
     bot_info = await app.bot.get_me()
     bot_username = bot_info.username
     session.bot_entity = await userbot.get_entity(f'@{bot_username}')
-    logger.info("✅ Telethon userbot started, bot entity cached")
+    logger.info("✅ Bot entity cached")
 
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
