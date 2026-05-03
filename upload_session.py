@@ -17,6 +17,7 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
+    from telethon.tl.types import InputMessagesFilterPhotoVideoDocuments
 except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}")
     sys.exit(1)
@@ -80,7 +81,7 @@ class Session:
         self.app = None
         self.userbot = None
         self.me_id = None
-        self.bot_username = None  # <---- نام کاربری ربات اینجا ذخیره می‌شود
+        self.bot_username = None
 
 session = Session()
 
@@ -133,7 +134,6 @@ async def finish(send_message: bool = True):
     session.files.clear()
     session.status_msg_id = None
     session.chat_id = None
-    # توجه: bot_username را پاک نمی‌کنیم چون نیاز است
     if send_message and session.app and OWNER_ID:
         try:
             await session.app.bot.send_message(OWNER_ID, "👋 نشست پایان یافت. /start برای شروع مجدد")
@@ -151,41 +151,28 @@ async def download_small_file(file_id: str, name: str, bot):
     logger.info(f"✅ دانلود کوچک (Bot API): {name} ({os.path.getsize(path)} B)")
     return path
 
-async def download_large_file(name: str, message_id: int, chat_entity):
+async def download_large_file(name: str, chat_entity):
     """
-    دانلود فایل بزرگ با یوزربات.
-    chat_entity: نام کاربری ربات (رشته) است.
+    دانلود آخرین فایل ارسالی کاربر (یوزربات) به ربات.
+    chat_entity: نام کاربری ربات یا entity معتبر
     """
     if not session.userbot or not session.me_id:
         raise Exception("یوزربات آماده نیست")
     path = os.path.join(session.temp_dir, name)
 
-    # روش اول: با message_id مستقیم
     try:
-        msg = await session.userbot.get_messages(chat_entity, ids=message_id)
-        if msg and msg.media:
-            await msg.download_media(file=path)
-            logger.info(f"✅ دانلود با یوزربات (با شناسه پیام {message_id}) از چت {chat_entity}")
-            return path
-        else:
-            logger.warning(f"پیام {message_id} در چت {chat_entity} یافت نشد یا رسانه ندارد.")
-    except Exception as e:
-        logger.warning(f"خطا در دریافت با message_id {message_id}: {e}")
-
-    # روش دوم: آخرین پیام‌ها (با نام کاربری معتبر)
-    try:
-        # گرفتن ۲۰ پیام آخر از چت با استفاده از نام کاربری
-        messages = await session.userbot.get_messages(chat_entity, limit=20)
-        target = None
-        for msg in messages:
-            if msg.media and msg.sender_id == session.me_id:
-                target = msg
-                break
-        if not target:
-            raise Exception("هیچ پیام رسانه‌ای از خودتان در این چت یافت نشد.")
-        await target.download_media(file=path)
-        logger.info(f"✅ دانلود با یوزربات (آخرین پیام خودتان) از چت {chat_entity}")
-        return path
+        # دریافت آخرین پیام رسانه‌ای ارسال شده توسط خود کاربر (یوزربات) به این چت
+        async for msg in session.userbot.iter_messages(
+            chat_entity,
+            from_user='me',  # فقط پیام‌های ارسالی خودم
+            filter=InputMessagesFilterPhotoVideoDocuments,  # فقط عکس، ویدیو، سند
+            limit=1  # فقط جدیدترین
+        ):
+            if msg and msg.media:
+                await msg.download_media(file=path)
+                logger.info(f"✅ دانلود با یوزربات (آخرین رسانه شما) از چت {chat_entity}")
+                return path
+        raise Exception("هیچ پیام رسانه‌ای از شما در این چت یافت نشد.")
     except Exception as e:
         logger.error(f"❌ دانلود با یوزربات شکست خورد: {e}")
         raise
@@ -222,7 +209,6 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
     size = os.path.getsize(local_path)
     urls = []
 
-    # کپشن جداگانه
     cap_path = None
     if caption_text.strip():
         cap_path = os.path.join(os.path.dirname(local_path), f"{orig_name}.caption.txt")
@@ -260,7 +246,6 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str = 
                     raise
             urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
             logger.info(f"✅ آپلود قطعه: {remote_part}")
-        # منیفست
         with open(man_path, "rb") as mf:
             man_data = mf.read()
         remote_man = f"{folder}{os.path.basename(man_path)}"
@@ -300,7 +285,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if session.chat_id is not None:
         await finish(send_message=False)
-    session.init_temp_dir()
+    # مقداردهی اولیه دایرکتوری
+    if session.temp_dir is None:
+        session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = update.effective_chat.id
     await update.message.reply_text(
         "🚀 **آپلودر تلگرام → گیت‌هاب**\n\n"
@@ -321,7 +308,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لطفاً در چت خصوصی استفاده کنید.")
         return
 
-    # اگر نشست فعال نبود، شروع کن
     if session.chat_id is None or session.temp_dir is None:
         await start(update, context)
         await asyncio.sleep(0.5)
@@ -366,14 +352,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ حجم فایل بیشتر از ۲ گیگابایت است.")
         return
 
-    session.init_temp_dir()
+    if session.temp_dir is None:
+        session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = msg.chat_id
 
     try:
         if file_size > 20 * 1024 * 1024:
             logger.info(f"فایل بزرگ ({size_str(file_size)}) - استفاده از یوزربات")
-            # 🔥 تغییر مهم: به جای msg.chat_id از session.bot_username استفاده می‌کنیم
-            local_path = await download_large_file(fname, msg.message_id, session.bot_username)
+            # استفاده از نام کاربری ربات برای دانلود آخرین فایل ارسالی شما
+            local_path = await download_large_file(fname, session.bot_username)
         else:
             logger.info(f"فایل کوچک ({size_str(file_size)}) - Bot API")
             local_path = await download_small_file(file_obj.file_id, fname, context.bot)
@@ -454,14 +441,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_status(context.bot)
         await query.answer("همه پاک شدند", show_alert=True)
 
-# =========================== تنظیم Session برای یوزربات ===========================
-def init_temp_dir(self):
-    if self.temp_dir is None:
-        self.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
-        logger.debug(f"دایرکتوری موقت: {self.temp_dir}")
-
-Session.init_temp_dir = init_temp_dir
-
+# =========================== راه‌اندازی یوزربات ===========================
 async def post_init(app: Application):
     session.app = app
     logger.info("راه‌اندازی یوزربات Telethon...")
@@ -480,7 +460,6 @@ async def post_init(app: Application):
     session.me_id = me.id
     logger.info(f"✅ یوزربات متصل: {me.username or me.first_name} (ID: {me.id})")
 
-    # گرفتن و ذخیره‌سازی نام کاربری ربات
     bot_info = await app.bot.get_me()
     if not bot_info.username:
         raise ValueError("ربات یوزرنیم ندارد. لطفاً با BotFather یوزرنیم تنظیم کنید.")
