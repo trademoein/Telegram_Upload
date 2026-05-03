@@ -17,12 +17,13 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
-    from telethon.tl.types import InputMessagesFilterPhotoVideoDocuments
+    # === تغییر کلیدی: نام صحیح فیلتر ===
+    from telethon.tl.types import InputMessagesFilterPhotoVideo, InputMessagesFilterDocument
 except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}\nلطفاً با دستور زیر نصب کنید:\npip install python-telegram-bot PyGithub telethon")
     sys.exit(1)
 
-# =========================== متغیرهای محیطی (از یک اکانت) ===========================
+# =========================== متغیرهای محیطی ===========================
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
 OWNER_ID        = os.getenv("OWNER_ID")
 GH_TOKEN        = os.getenv("GH_TOKEN")
@@ -156,23 +157,48 @@ async def download_small_file(file_id: str, name: str, bot):
     return path
 
 async def download_large_file(name: str):
+    """دریافت آخرین فایل ارسال شده توسط کاربر (عکس، ویدیو، سند و ...) با استفاده از Telethon"""
     if not session.userbot or not session.bot_username:
         raise Exception("یوزربات یا نام کاربری ربات مقداردهی نشده است.")
     path = os.path.join(session.temp_dir, name)
+
     try:
-        async for msg in session.userbot.iter_messages(
-            session.bot_username,
-            from_user='me',
-            filter=InputMessagesFilterPhotoVideoDocuments,
-            limit=1
-        ):
-            if msg and msg.media:
-                await msg.download_media(file=path)
-                logger.info(f"✅ دانلود با یوزربات: {name} ({size_str(os.path.getsize(path))})")
-                return path
-        raise Exception("هیچ فایل رسانه‌ای از شما در چت با ربات یافت نشد.")
+        # === دریافت آخرین پیام حاوی عکس، ویدیو یا هر فایل دیگری (Document) ===
+        # ابتدا سعی می‌کنیم با فیلترهای ترکیبی جدیدترین را پیدا کنیم
+        found_media = None
+        for f in [InputMessagesFilterPhotoVideo, InputMessagesFilterDocument]:
+            async for msg in session.userbot.iter_messages(
+                session.bot_username,
+                from_user='me',        # فقط پیام‌های ارسالی خودم
+                filter=f,              # فیلتر اعمال شده (گرفته شده از مستندات رسمی)
+                limit=1                # فقط آخرین پیام
+            ):
+                if msg and msg.media:
+                    found_media = msg
+                    break
+            if found_media:
+                break
+
+        # اگر هیچ‌کدام کار نکرد، fallback به بررسی دستی آخرین پیام با استفاده از خواص message.media
+        if not found_media:
+            async for msg in session.userbot.iter_messages(
+                session.bot_username,
+                from_user='me',
+                limit=5                 # 5 پیام آخر را چک می‌کنیم
+            ):
+                if msg and msg.media:
+                    found_media = msg
+                    break
+
+        if not found_media:
+            raise Exception("هیچ فایل رسانه‌ای از شما در چت با ربات یافت نشد.")
+
+        await found_media.download_media(file=path)
+        logger.info(f"✅ دانلود با یوزربات موفق: {name} ({size_str(os.path.getsize(path))})")
+        return path
+
     except Exception as e:
-        logger.error(f"❌ خطا در دانلود با یوزربات: {e}")
+        logger.error(f"❌ خطا در دانلود با یوزربات: {e}", exc_info=True)
         raise
 
 # =========================== آپلود در گیت‌هاب ===========================
