@@ -16,7 +16,6 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
-    from telethon.tl.types import PeerUser
 except ImportError as e:
     print("❌ کتابخانه‌ها نصب نیستند:", e)
     sys.exit(1)
@@ -120,12 +119,8 @@ async def download_large_file(name):
         raise Exception("Userbot client not initialized")
     path = os.path.join(session.temp_dir, name)
 
-    # رفع مشکل PeerUser
-    try:
-        entity = await session.userbot.get_input_entity(session.chat_id)
-    except ValueError:
-        entity = PeerUser(session.chat_id)
-
+    # entity مالک قبلاً در post_init کش شده، مستقیم دریافت می‌کنیم
+    entity = await session.userbot.get_input_entity(OWNER_ID)
     message = await session.userbot.get_messages(entity, ids=session.last_message_id)
     if not message:
         raise Exception("Message not found via userbot")
@@ -434,6 +429,10 @@ async def post_init(app: Application):
     userbot = TelegramClient(mem, API_ID, API_HASH)
     await userbot.connect()
     session.userbot = userbot
+
+    # کش کردن entity کاربر مالک (OWNER_ID)
+    await userbot.get_entity(OWNER_ID)
+
     logger.info("✅ Telethon userbot started")
 
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
