@@ -6,6 +6,7 @@ import asyncio
 import logging
 import json
 import math
+import time
 from datetime import datetime
 
 try:
@@ -17,7 +18,6 @@ try:
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
     from telethon.tl.types import InputMessagesFilterPhotoVideo, InputMessagesFilterDocument
-    from telethon.errors import RPCError
 except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}")
     sys.exit(1)
@@ -76,14 +76,14 @@ except Exception as e:
 class Session:
     def __init__(self):
         self.temp_dir = None
-        self.files = []              # هر فایل: {name, size, local_path, caption}
+        self.files = []
         self.status_msg_id = None
         self.chat_id = None
         self.idle_task = None
         self.app = None
         self.userbot = None
         self.bot_username = None
-        self.is_active = False       # برای جلوگیری از قطع زودهنگام
+        self.is_active = False
 
 session = Session()
 
@@ -95,7 +95,6 @@ def size_str(size: int) -> str:
     return f"{size:.1f} TB"
 
 async def update_status(bot):
-    """نمایش دکمه‌ها و لیست فایل‌ها"""
     if not session.chat_id:
         return
     text = "📂 **فایل‌های آماده**\n\n"
@@ -133,7 +132,6 @@ async def idle_timeout():
     await finish(send_message=True)
 
 async def finish(send_message: bool = True):
-    """پایان نشست و قطع یوزربات (فقط یک بار)"""
     if session.idle_task:
         session.idle_task.cancel()
     if session.temp_dir and os.path.exists(session.temp_dir):
@@ -156,7 +154,6 @@ async def finish(send_message: bool = True):
 async def download_small_file(file_id: str, name: str, bot, progress_msg):
     path = os.path.join(session.temp_dir, name)
     file = await bot.get_file(file_id)
-    # برای فایل‌های کوچک، پیشرفت ساده
     await progress_msg.edit_text(f"📥 در حال دانلود {name}... (Bot API)")
     await file.download_to_drive(path)
     await progress_msg.delete()
@@ -164,12 +161,10 @@ async def download_small_file(file_id: str, name: str, bot, progress_msg):
     return path
 
 async def download_large_file(name: str, progress_msg):
-    """دانلود فایل بزرگ با یوزربات و نمایش پیشرفت تقریبی (با محاسبه حجم)"""
     if not session.userbot or not session.bot_username:
         raise Exception("یوزربات آماده نیست")
     path = os.path.join(session.temp_dir, name)
 
-    # پیدا کردن پیام
     await progress_msg.edit_text(f"🔍 در حال جستجوی فایل {name}...")
     found_media = None
     for filter_type in (InputMessagesFilterPhotoVideo, InputMessagesFilterDocument):
@@ -187,7 +182,6 @@ async def download_large_file(name: str, progress_msg):
     if not found_media:
         raise Exception("فایل یافت نشد")
 
-    # دانلود با پیشرفت دستی (Telethon خود پیشرفت می‌دهد، ما آن را به پیام می‌زنیم)
     file_size = found_media.file.size
     downloaded = 0
     last_percent = 0
@@ -207,7 +201,7 @@ async def download_large_file(name: str, progress_msg):
     logger.info(f"✅ دانلود بزرگ: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-# ========== آپلود به گیت‌هاب ==========
+# ========== آپلود به گیت‌هاب با retry ==========
 def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
     size = os.path.getsize(path)
     num = math.ceil(size / chunk)
@@ -233,6 +227,36 @@ def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
         json.dump(manifest, mf, indent=2)
     return parts, man_path
 
+async def upload_to_github_with_retry(remote_path, data, commit_msg, progress_msg, retries=3):
+    for attempt in range(1, retries+1):
+        try:
+            repo.create_file(remote_path, commit_msg, data, branch="main")
+            logger.info(f"✅ آپلود موفق: {remote_path} (تلاش {attempt})")
+            return True
+        except GithubException as e:
+            if e.status == 409:
+                # فایل وجود دارد -> آپدیت
+                contents = repo.get_contents(remote_path)
+                repo.update_file(remote_path, commit_msg, data, contents.sha, branch="main")
+                logger.info(f"✅ آپدیت موفق: {remote_path}")
+                return True
+            elif e.status in [500, 502, 503, 504]:  # خطاهای سرور گیت‌هاب
+                logger.warning(f"⚠️ خطای {e.status} در آپلود {remote_path}، تلاش {attempt}/{retries}")
+                if attempt < retries:
+                    await asyncio.sleep(2 ** attempt)  # 2,4,8 ثانیه
+                    continue
+                else:
+                    raise
+            else:
+                raise
+        except Exception as e:
+            if attempt < retries:
+                logger.warning(f"⚠️ خطا: {e}، تلاش مجدد {attempt}/{retries}")
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise
+    return False
+
 async def upload_to_github(local_path: str, orig_name: str, caption_text: str, progress_msg):
     base = os.path.splitext(orig_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -246,19 +270,13 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str, p
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
+    # آپلود فایل یا قطعات
     if size <= 100 * 1024 * 1024:
         remote = f"{folder}{orig_name}"
         with open(local_path, "rb") as f:
             data = f.read()
         await progress_msg.edit_text(f"📤 آپلود {orig_name} به گیت‌هاب...")
-        try:
-            repo.create_file(remote, f"Upload {orig_name}", data, branch="main")
-        except GithubException as e:
-            if e.status == 409:
-                contents = repo.get_contents(remote)
-                repo.update_file(remote, f"Update {orig_name}", data, contents.sha, branch="main")
-            else:
-                raise
+        await upload_to_github_with_retry(remote, data, f"Upload {orig_name}", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote}")
         logger.info(f"✅ آپلود کامل: {remote}")
     else:
@@ -270,20 +288,13 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str, p
             with open(part, "rb") as pf:
                 data = pf.read()
             await progress_msg.edit_text(f"📤 آپلود {orig_name} (قطعه {idx}/{total_parts})...")
-            try:
-                repo.create_file(remote_part, f"Upload {pname}", data, branch="main")
-            except GithubException as e:
-                if e.status == 409:
-                    contents = repo.get_contents(remote_part)
-                    repo.update_file(remote_part, f"Update {pname}", data, contents.sha, branch="main")
-                else:
-                    raise
+            await upload_to_github_with_retry(remote_part, data, f"Upload {pname}", progress_msg)
             urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_part}")
         # آپلود منیفست
         with open(man_path, "rb") as mf:
             man_data = mf.read()
         remote_man = f"{folder}{os.path.basename(man_path)}"
-        repo.create_file(remote_man, "Upload manifest", man_data, branch="main")
+        await upload_to_github_with_retry(remote_man, man_data, "Upload manifest", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_man}")
         logger.info("✅ منیفست آپلود شد")
 
@@ -291,7 +302,7 @@ async def upload_to_github(local_path: str, orig_name: str, caption_text: str, p
         remote_cap = f"{folder}{orig_name}.caption.txt"
         with open(cap_path, "rb") as cf:
             cap_data = cf.read()
-        repo.create_file(remote_cap, "Upload caption", cap_data, branch="main")
+        await upload_to_github_with_retry(remote_cap, cap_data, "Upload caption", progress_msg)
         urls.append(f"https://raw.githubusercontent.com/{REPO_NAME}/main/{remote_cap}")
         logger.info("✅ کپشن آپلود شد")
 
@@ -315,7 +326,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ فایل خود را ارسال کنید.\n"
         "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
         "🔹 فایل‌های >۱۰۰MB به قطعات ۹۵MB تقسیم می‌شوند.\n"
-        "🔹 پس از هر فایل، دکمه‌ها ظاهر می‌شوند.\n"
+        "🔹 پس از هر فایل، دکمه‌ها به‌روز می‌شوند.\n"
         "🔹 بی‌کاری ۱۵ دقیقه → پایان خودکار.\n\n"
         "_فقط شما مجاز هستید._",
         parse_mode="Markdown"
@@ -379,7 +390,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
     session.chat_id = msg.chat_id
 
-    # ارسال پیام پیشرفت
     progress_msg = await msg.reply_text("⏳ آماده‌سازی...")
 
     try:
@@ -431,8 +441,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب...")
         results = []
-        for idx, f in enumerate(session.files, 1):
-            progress_msg = await context.bot.send_message(session.chat_id, f"🔄 آپلود {f['name']}...")
+        for f in session.files:
+            progress_msg = await context.bot.send_message(session.chat_id, f"🔄 شروع آپلود {f['name']}...")
             try:
                 urls = await upload_to_github(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
                 if len(urls) == 1:
