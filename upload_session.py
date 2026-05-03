@@ -5,7 +5,6 @@ import shutil
 import asyncio
 import logging
 import json
-import math
 from datetime import datetime
 
 try:
@@ -14,22 +13,23 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
-    from telethon.tl.types import InputMessagesFilterPhotoVideo, InputMessagesFilterDocument
     import git
+    from git.exc import GitCommandError
 except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}\nلطفاً با دستور زیر نصب کنید:\npip install python-telegram-bot telethon GitPython")
     sys.exit(1)
 
-# ========== متغیرهای محیطی ==========
-BOT_TOKEN       = os.getenv("BOT_TOKEN")
-OWNER_ID        = os.getenv("OWNER_ID")
-GH_TOKEN        = os.getenv("GH_TOKEN")
-REPO_NAME       = os.getenv("REPO_NAME")
-API_ID          = os.getenv("API_ID")
-API_HASH        = os.getenv("API_HASH")
-DC_ID           = os.getenv("DC_ID")
-AUTH_KEY_HEX    = os.getenv("AUTH_KEY_HEX")
-USER_ID         = os.getenv("USER_ID")
+# ========== تنظیمات ==========
+SPLIT_SIZE = 95 * 1024 * 1024  # 95 مگابایت (برای امنیت بیشتر از حد مجاز گیت‌هاب)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = os.getenv("OWNER_ID")
+GH_TOKEN = os.getenv("GH_TOKEN")
+REPO_NAME = os.getenv("REPO_NAME")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+DC_ID = os.getenv("DC_ID")
+AUTH_KEY_HEX = os.getenv("AUTH_KEY_HEX")
+USER_ID = os.getenv("USER_ID")
 
 try:
     OWNER_ID = int(OWNER_ID) if OWNER_ID else 0
@@ -58,16 +58,15 @@ if not USER_ID: missing.append("USER_ID")
 if missing:
     raise ValueError(f"❌ متغیرهای گم شده: {', '.join(missing)}")
 
-logger.info(f"✅ OWNER: {OWNER_ID} | REPO: {REPO_NAME}")
+logger.info(f"✅ OWNER: {OWNER_ID} | REPO: {REPO_NAME} | SPLIT SIZE: {SPLIT_SIZE//(1024*1024)} MB")
 
 # ========== کلاس نشست ==========
 class Session:
     def __init__(self):
         self.temp_dir = None
-        self.files = []
+        self.files = []      # هر عنصر: {"name": original, "size": bytes, "local_path": may be dir or file, "caption": str, "is_split": bool}
         self.status_msg_id = None
         self.chat_id = None
-        self.idle_task = None
         self.app = None
         self.userbot = None
         self.bot_username = None
@@ -91,7 +90,8 @@ async def update_status(bot):
         text += "هیچ فایلی اضافه نشده است."
     else:
         for i, f in enumerate(session.files, 1):
-            text += f"{i}. {f['name']} ({size_str(f['size'])})\n"
+            split_tag = " (تقسیم شده)" if f.get('is_split', False) else ""
+            text += f"{i}. {f['name']} ({size_str(f['size'])}{split_tag})\n"
     text += f"\nتعداد: {len(session.files)}"
 
     keyboard = InlineKeyboardMarkup([
@@ -110,35 +110,33 @@ async def update_status(bot):
     except Exception as e:
         logger.error(f"خطا در به‌روزرسانی: {e}")
 
-async def reset_idle():
-    if session.idle_task:
-        session.idle_task.cancel()
-    session.idle_task = asyncio.create_task(idle_timeout())
-
-async def idle_timeout():
-    await asyncio.sleep(1800)  # 30 دقیقه
-    logger.warning("⏰ تایم‌اوت بی‌کاری - پایان نشست")
-    await finish(send_message=True)
-
 async def finish(send_message: bool = True):
-    if session.idle_task:
-        session.idle_task.cancel()
-    # فقط دایرکتوری موقت را پاک می‌کنیم، فایل‌های مخزن را نه
+    """پایان نشست - پاکسازی فایل‌های موقت"""
     if session.temp_dir and os.path.exists(session.temp_dir):
         shutil.rmtree(session.temp_dir, ignore_errors=True)
         session.temp_dir = None
+    
+    for f in session.files:
+        local_path = f.get("local_path")
+        if local_path and os.path.exists(local_path):
+            try:
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path, ignore_errors=True)
+                else:
+                    os.remove(local_path)
+            except:
+                pass
+    
     session.files.clear()
     session.status_msg_id = None
     session.chat_id = None
     session.is_active = False
+    
     if send_message and session.app and OWNER_ID:
         try:
             await session.app.bot.send_message(OWNER_ID, "👋 نشست پایان یافت. /start برای شروع مجدد")
         except Exception as e:
             logger.error(f"خطا: {e}")
-    if session.userbot and session.userbot.is_connected():
-        await session.userbot.disconnect()
-        logger.info("یوزربات قطع شد.")
 
 async def ensure_userbot_connected():
     if session.userbot is None:
@@ -169,136 +167,215 @@ async def download_large_file(name: str, progress_msg):
     await progress_msg.edit_text(f"🔍 در حال جستجوی فایل {name}...")
 
     found_media = None
-    for filter_type in (InputMessagesFilterPhotoVideo, InputMessagesFilterDocument):
-        async for msg in session.userbot.iter_messages(
-            session.bot_username,
-            from_user=OWNER_ID,
-            filter=filter_type,
-            limit=1
-        ):
-            if msg and msg.media:
-                found_media = msg
-                break
-        if found_media:
+    async for msg in session.userbot.iter_messages(
+        session.bot_username,
+        from_user=OWNER_ID,
+        limit=5
+    ):
+        if msg and msg.media:
+            found_media = msg
             break
+    
     if not found_media:
-        raise Exception("فایل یافت نشد")
+        raise Exception("فایل یافت نشد. لطفاً فایل را دوباره ارسال کنید.")
 
-    file_size = found_media.file.size
+    file_size = found_media.file.size if found_media.file else 0
     last_percent = 0
 
     async def progress_callback(current, total):
         nonlocal last_percent
+        if total == 0:
+            return
         percent = int((current / total) * 100)
         if percent > last_percent:
             last_percent = percent
             bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
-            await progress_msg.edit_text(f"📥 دانلود {name}:\n`[{bar}] {percent}%`\n{size_str(current)} / {size_str(total)}",
-                                         parse_mode="Markdown")
+            try:
+                await progress_msg.edit_text(f"📥 دانلود {name}:\n`[{bar}] {percent}%`\n{size_str(current)} / {size_str(total)}",
+                                             parse_mode="Markdown")
+            except:
+                pass
 
     await found_media.download_media(file=path, progress_callback=progress_callback)
     await progress_msg.delete()
     logger.info(f"✅ دانلود بزرگ: {name} ({size_str(os.path.getsize(path))})")
     return path
 
-# ========== آپلود با Git (با pull و push امن) ==========
-async def upload_to_github_with_git(local_path: str, orig_name: str, caption_text: str = "", progress_msg=None):
+# ========== عملیات Split فایل ==========
+def split_file(input_path: str, output_dir: str, part_size: int = SPLIT_SIZE):
+    """
+    فایل ورودی را به قطعات part_size تقسیم کرده و در output_dir ذخیره می‌کند.
+    نام قطعات: mainname.ext.part001, mainname.ext.part002, ...
+    همچنین فایل meta.json و اسکریپت بازسازی تولید می‌کند.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.basename(input_path)
+    part_prefix = os.path.join(output_dir, base_name + ".part")
+    
+    part_num = 1
+    with open(input_path, 'rb') as f:
+        while True:
+            chunk = f.read(part_size)
+            if not chunk:
+                break
+            part_path = f"{part_prefix}{part_num:03d}"
+            with open(part_path, 'wb') as p:
+                p.write(chunk)
+            part_num += 1
+    
+    total_parts = part_num - 1
+    # ذخیره اطلاعات split
+    meta = {
+        "original_name": base_name,
+        "original_size": os.path.getsize(input_path),
+        "part_size": part_size,
+        "total_parts": total_parts,
+        "parts": [f"{base_name}.part{i:03d}" for i in range(1, total_parts+1)]
+    }
+    with open(os.path.join(output_dir, "_split_meta.json"), 'w', encoding='utf-8') as mf:
+        json.dump(meta, mf, indent=2)
+    
+    # اسکریپت بازسازی برای لینوکس/مک
+    reassemble_sh = f"""#!/bin/bash
+# بازسازی فایل اصلی از قطعات
+# فایل اصلی: {base_name}
+cat {base_name}.part* > {base_name}
+echo "✅ فایل {base_name} بازسازی شد. حجم: $(du -h {base_name} | cut -f1)"
+"""
+    with open(os.path.join(output_dir, "reassemble.sh"), 'w', encoding='utf-8') as sh:
+        sh.write(reassemble_sh)
+    os.chmod(os.path.join(output_dir, "reassemble.sh"), 0o755)
+    
+    # اسکریپت بازسازی برای ویندوز
+    reassemble_bat = f"""@echo off
+REM بازسازی فایل اصلی از قطعات (ویندوز)
+copy /b {base_name}.part* {base_name}
+echo ✅ فایل {base_name} بازسازی شد.
+"""
+    with open(os.path.join(output_dir, "reassemble.bat"), 'w', encoding='utf-8') as bat:
+        bat.write(reassemble_bat)
+    
+    logger.info(f"✅ فایل {base_name} به {total_parts} قطعه تقسیم شد در {output_dir}")
+    return output_dir, total_parts
+
+# ========== آپلود با گیت (پشتیبانی از پوشه حاوی قطعات) ==========
+async def upload_to_github_with_git(local_path_or_dir: str, orig_name: str, caption_text: str = "", is_split: bool = False, progress_msg=None):
+    """
+    اگر is_split == True، local_path_or_dir یک پوشه حاوی قطعات است.
+    در غیر این صورت یک فایل واحد است.
+    """
     remote_url = f"https://{GH_TOKEN}@github.com/{REPO_NAME}.git"
     
     if session.repo_dir is None:
         session.repo_dir = os.path.join(session.temp_dir, "github_repo")
     
-    # اگر مخزن وجود نداشت، clone کن
     if not os.path.exists(session.repo_dir):
         if progress_msg:
             await progress_msg.edit_text("📥 در حال clone مخزن گیت‌هاب...")
         repo = git.Repo.clone_from(remote_url, session.repo_dir, branch="main")
     else:
         repo = git.Repo(session.repo_dir)
-        # گرفتن آخرین تغییرات بدون از دست دادن تغییرات محلی
         if progress_msg:
             await progress_msg.edit_text("🔄 در حال همگام‌سازی با مخزن...")
         repo.git.reset("--hard")
         repo.git.clean("-fd")
-        repo.remotes.origin.pull()
-
-    # ساختار مرتب
+        try:
+            repo.remotes.origin.pull(rebase=True)
+        except GitCommandError as e:
+            logger.warning(f"خطا در pull: {e}. تلاش با reset --hard origin/main")
+            repo.git.fetch()
+            repo.git.reset("--hard", "origin/main")
+    
     now = datetime.now()
     date_path = now.strftime("%Y/%m/%d")
     base_name = os.path.splitext(orig_name)[0]
     timestamp = now.strftime("%H%M%S")
-    final_folder_name = f"{base_name}_{timestamp}"
+    folder_name = f"{base_name}_{timestamp}"
+    dest_dir = os.path.join(session.repo_dir, "uploads", date_path, folder_name)
+    os.makedirs(dest_dir, exist_ok=True)
     
-    folder_in_repo = os.path.join(session.repo_dir, "uploads", date_path, final_folder_name)
-    os.makedirs(folder_in_repo, exist_ok=True)
-
-    # کپی فایل اصلی
-    dest_file = os.path.join(folder_in_repo, orig_name)
-    shutil.copy2(local_path, dest_file)
-
-    # کپی کپشن
-    if caption_text.strip():
-        cap_path = os.path.join(folder_in_repo, f"{orig_name}.caption.txt")
-        with open(cap_path, "w", encoding="utf-8") as cp:
-            cp.write(caption_text)
-
-    # Commit
+    if is_split:
+        # کپی کل پوشه محتویات (قطعات و متا) به مقصد
+        for item in os.listdir(local_path_or_dir):
+            src = os.path.join(local_path_or_dir, item)
+            dst = os.path.join(dest_dir, item)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        # کپی کپشن (اگر داشته باشد)
+        if caption_text.strip():
+            cap_path = os.path.join(dest_dir, f"{orig_name}.caption.txt")
+            with open(cap_path, "w", encoding="utf-8") as cp:
+                cp.write(caption_text)
+    else:
+        # فایل تکی
+        shutil.copy2(local_path_or_dir, os.path.join(dest_dir, orig_name))
+        if caption_text.strip():
+            cap_path = os.path.join(dest_dir, f"{orig_name}.caption.txt")
+            with open(cap_path, "w", encoding="utf-8") as cp:
+                cp.write(caption_text)
+    
     if progress_msg:
-        await progress_msg.edit_text(f"📤 در حال commit و push...")
+        await progress_msg.edit_text(f"📝 در حال commit...")
     repo.index.add("*")
-    commit_msg = f"Add {orig_name} at {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    commit_msg = f"{'Split: ' if is_split else 'Add '}{orig_name} at {now.strftime('%Y-%m-%d %H:%M:%S')}"
     repo.index.commit(commit_msg)
     
-    # Push با تلاش مجدد و rebase
     push_success = False
-    for attempt in range(5):  # 5 بار تلاش
+    last_error = None
+    for attempt in range(5):
         try:
-            # قبل از push یک pull --rebase انجام بده تا با تغییرات جدید هماهنگ شود
-            repo.remotes.origin.pull(rebase=True)
-            repo.remotes.origin.push()
-            push_success = True
-            break
-        except Exception as e:
+            if progress_msg:
+                await progress_msg.edit_text(f"📤 در حال push (تلاش {attempt+1}/5)...")
+            if attempt > 0:
+                repo.remotes.origin.pull(rebase=True)
+            push_result = repo.remotes.origin.push()
+            success = True
+            for info in push_result:
+                if info.flags & git.remote.PushInfo.ERROR:
+                    success = False
+                    last_error = info.summary
+                    logger.error(f"خطا در push: {info.summary}")
+                    break
+            if success:
+                push_success = True
+                break
+            else:
+                raise GitCommandError('push', 'non-fast-forward or rejected')
+        except GitCommandError as e:
+            last_error = str(e)
             logger.warning(f"⚠️ خطا در push (تلاش {attempt+1}/5): {e}")
             if attempt < 4:
-                await asyncio.sleep(3 * (attempt + 1))  # زمان انتظار افزایشی
+                await asyncio.sleep(3 * (attempt + 1))
             else:
-                raise
+                if "non-fast-forward" in str(e) or "rejected" in str(e):
+                    if progress_msg:
+                        await progress_msg.edit_text("⚠️ مخزن به‌روز نیست، تلاش با force push...")
+                    try:
+                        repo.remotes.origin.push(force=True)
+                        push_success = True
+                        logger.warning("از force push استفاده شد.")
+                        break
+                    except GitCommandError as e2:
+                        last_error = str(e2)
+                        logger.error(f"force push نیز ناموفق: {e2}")
+                raise Exception(f"پس از ۵ بار تلاش، push ناموفق: {last_error}")
     
     if not push_success:
-        raise Exception("پس از ۵ بار تلاش، push موفق نبود")
-
-    relative_path = f"uploads/{date_path}/{final_folder_name}/{orig_name}"
+        raise Exception(f"push با خطا مواجه شد: {last_error}")
+    
+    relative_path = f"uploads/{date_path}/{folder_name}/"
+    if not is_split:
+        relative_path += orig_name
+    else:
+        relative_path += f"(split into {len([f for f in os.listdir(dest_dir) if f.startswith(orig_name+'.part')])} parts)"
+    
     if progress_msg:
         await progress_msg.delete()
     return relative_path
 
-# ========== هندلرهای ربات ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != OWNER_ID:
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
-        return
-    if session.chat_id is not None:
-        await finish(send_message=False)
-    session.is_active = True
-    if session.temp_dir is None:
-        session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
-    session.chat_id = update.effective_chat.id
-    await update.message.reply_text(
-        "🚀 **آپلودر تلگرام → گیت‌هاب (پایدار)**\n\n"
-        "✅ فایل خود را ارسال کنید.\n"
-        "📂 ساختار ذخیره‌سازی: `uploads/سال/ماه/روز/نام فایل_زمان/`\n"
-        "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
-        "🔹 آپلود با Git (اتصال خودکار، push مقاوم)\n"
-        "🔹 فایل‌ها برای همیشه در مخزن می‌مانند.\n"
-        "🔹 برای دانلود، کل مخزن را به صورت ZIP دریافت کنید.\n"
-        "🔹 مدت بی‌کاری: ۳۰ دقیقه\n\n"
-        "_فقط شما مجاز هستید._",
-        parse_mode="Markdown"
-    )
-    await reset_idle()
-
+# ========== هندلر فایل (با تشخیص نیاز به split) ==========
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id != OWNER_ID:
@@ -311,8 +388,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not session.is_active or session.chat_id is None:
         await start(update, context)
         await asyncio.sleep(0.5)
-
-    await reset_idle()
 
     msg = update.message
     caption = msg.caption or ""
@@ -359,23 +434,45 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress_msg = await msg.reply_text("⏳ آماده‌سازی...")
 
     try:
+        # دانلود فایل (بزرگ یا کوچک)
         if file_size > 20 * 1024 * 1024:
             logger.info(f"📥 فایل بزرگ ({size_str(file_size)}) - یوزربات")
-            local_path = await download_large_file(fname, progress_msg)
+            downloaded_path = await download_large_file(fname, progress_msg)
         else:
             logger.info(f"📥 فایل کوچک ({size_str(file_size)}) - Bot API")
-            local_path = await download_small_file(file_obj.file_id, fname, context.bot, progress_msg)
+            downloaded_path = await download_small_file(file_obj.file_id, fname, context.bot, progress_msg)
+        
+        # بررسی نیاز به split
+        if file_size > SPLIT_SIZE:
+            logger.info(f"✂️ فایل {fname} بزرگتر از {SPLIT_SIZE//(1024*1024)} MB است، تقسیم می‌شود...")
+            split_dir = tempfile.mkdtemp(dir=session.temp_dir, prefix="split_")
+            split_output_dir, total_parts = split_file(downloaded_path, split_dir, SPLIT_SIZE)
+            # حذف فایل اصلی بعد از split
+            os.remove(downloaded_path)
+            session.files.append({
+                "name": fname,
+                "size": file_size,
+                "local_path": split_output_dir,   # دایرکتوری حاوی قطعات
+                "caption": caption,
+                "is_split": True,
+                "total_parts": total_parts
+            })
+            await progress_msg.edit_text(f"✂️ فایل {fname} به {total_parts} قطعه تقسیم شد و آماده آپلود است.")
+            await asyncio.sleep(1)
+            await progress_msg.delete()
+        else:
+            session.files.append({
+                "name": fname,
+                "size": file_size,
+                "local_path": downloaded_path,
+                "caption": caption,
+                "is_split": False
+            })
+            await progress_msg.delete()
     except Exception as e:
-        logger.error(f"❌ خطا در دانلود {fname}: {e}", exc_info=True)
-        await progress_msg.edit_text(f"❌ دانلود ناموفق: {str(e)}")
+        logger.error(f"❌ خطا در پردازش {fname}: {e}", exc_info=True)
+        await progress_msg.edit_text(f"❌ خطا: {str(e)}")
         return
-
-    session.files.append({
-        "name": fname,
-        "size": file_size,
-        "local_path": local_path,
-        "caption": caption
-    })
 
     await update_status(context.bot)
 
@@ -385,6 +482,30 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     logger.info(f"✅ فایل اضافه شد: {fname} ({size_str(file_size)})")
+
+# ========== سایر هندلرها (بدون تغییر مگر در نمایش نتیجه) ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != OWNER_ID:
+        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+        return
+    if session.chat_id is not None:
+        await finish(send_message=False)
+    session.is_active = True
+    if session.temp_dir is None:
+        session.temp_dir = tempfile.mkdtemp(prefix="tg_upload_")
+    session.chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "🚀 **آپلودر تلگرام → گیت‌هاب (با قابلیت Split)**\n\n"
+        "✅ فایل خود را ارسال کنید.\n"
+        f"📦 فایل‌های بالای {SPLIT_SIZE//(1024*1024)} مگابایت خودکار به قطعات تقسیم می‌شوند.\n"
+        "📂 ساختار: `uploads/سال/ماه/روز/نام فایل_زمان/`\n"
+        "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
+        "🔹 برای بازسازی فایل اصلی، داخل هر پوشه فایل `reassemble.sh` (لینوکس) یا `reassemble.bat` (ویندوز) موجود است.\n"
+        "🔹 ربات هرگز خودکار خاموش نمی‌شود.\n\n"
+        "_فقط شما مجاز هستید._",
+        parse_mode="Markdown"
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -398,26 +519,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⛔ دسترسی غیرمجاز.")
         return
 
-    await reset_idle()
     data = query.data
 
     if data == "upload":
         if not session.files:
             await query.edit_message_text("❌ هیچ فایلی برای آپلود نیست.")
             return
-        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب (این عملیات ممکن است کمی طول بکشد)...")
+        await query.edit_message_text("🔄 در حال آپلود به گیت‌هاب...")
         results = []
-        for f in session.files:
-            progress_msg = await context.bot.send_message(session.chat_id, f"🔄 شروع آپلود {f['name']}...")
+        for idx, f in enumerate(session.files):
+            progress_msg = await context.bot.send_message(session.chat_id, f"🔄 {idx+1}/{len(session.files)}: شروع آپلود {f['name']}...")
             try:
-                relative_path = await upload_to_github_with_git(f["local_path"], f["name"], f.get("caption", ""), progress_msg)
-                results.append(f"✅ {f['name']} → ذخیره شد در: `{relative_path}`")
-                logger.info(f"✅ آپلود موفق: {f['name']} -> {relative_path}")
+                relative_path = await upload_to_github_with_git(
+                    f["local_path"], 
+                    f["name"], 
+                    f.get("caption", ""), 
+                    f.get("is_split", False), 
+                    progress_msg
+                )
+                if f.get("is_split", False):
+                    results.append(f"✅ {f['name']} → تقسیم شده در: `{relative_path}` (قطعات: {f.get('total_parts', '?')})")
+                else:
+                    results.append(f"✅ {f['name']} → `{relative_path}`")
+                logger.info(f"✅ آپلود موفق: {f['name']}")
             except Exception as e:
-                logger.error(f"❌ خطا در آپلود {f['name']}: {e}", exc_info=True)
+                logger.error(f"❌ خطا در آپلود {f['name']}: {e}")
                 results.append(f"❌ {f['name']} – خطا: {str(e)}")
-                await progress_msg.edit_text(f"❌ خطا در آپلود {f['name']}")
-        final = "**نتیجهٔ آپلود:**\n\n" + "\n".join(results) + "\n\n📌 **نحوه دانلود:** به مخزن گیت‌هاب بروید، روی دکمه `Code` کلیک کرده و `Download ZIP` را انتخاب کنید. سپس فایل مورد نظر را از داخل پوشه uploads استخراج کنید.\n\n🗑️ **مدیریت فایل‌ها:** فایل‌ها برای همیشه در مخزن می‌مانند. شما می‌توانید خودتان آن‌ها را حذف یا مدیریت کنید."
+                await progress_msg.edit_text(f"❌ خطا: {str(e)[:200]}")
+        final = "**نتیجه آپلود:**\n\n" + "\n".join(results) + "\n\n📌 **نحوه دانلود و بازسازی:**\n1. مخزن را به صورت ZIP دانلود کنید.\n2. داخل پوشه مربوطه، اگر فایل split شده، اسکریپت `reassemble.sh` (لینوکس) یا `reassemble.bat` (ویندوز) را اجرا کنید تا فایل اصلی ساخته شود."
         await query.edit_message_text(final, parse_mode="Markdown", disable_web_page_preview=True)
         await finish(send_message=True)
 
@@ -428,24 +557,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "remove_last":
         if session.files:
             removed = session.files.pop()
-            if os.path.exists(removed["local_path"]):
-                os.remove(removed["local_path"])
+            local_path = removed.get("local_path")
+            if local_path and os.path.exists(local_path):
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path, ignore_errors=True)
+                else:
+                    os.remove(local_path)
             await update_status(context.bot)
+            await query.answer("آخرین فایل حذف شد", show_alert=True)
         else:
             await query.answer("لیست خالی", show_alert=True)
 
     elif data == "clear_all":
         for f in session.files:
-            if os.path.exists(f["local_path"]):
-                os.remove(f["local_path"])
+            local_path = f.get("local_path")
+            if local_path and os.path.exists(local_path):
+                if os.path.isdir(local_path):
+                    shutil.rmtree(local_path, ignore_errors=True)
+                else:
+                    os.remove(local_path)
         session.files.clear()
         await update_status(context.bot)
         await query.answer("همه پاک شدند", show_alert=True)
 
-# ========== راه‌اندازی یوزربات ==========
+# ========== راه‌اندازی یوزربات (یک بار) ==========
 async def post_init(app: Application):
     session.app = app
-    logger.info("🔌 راه‌اندازی یوزربات...")
+    logger.info("🔌 راه‌اندازی یوزربات (همیشه متصل می‌ماند)...")
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -459,8 +597,6 @@ async def post_init(app: Application):
         raise ValueError("❌ یوزربات احراز هویت نشد.")
     me = await userbot.get_me()
     logger.info(f"✅ یوزربات متصل: {me.first_name} (@{me.username}) ID: {me.id}")
-    if me.id != OWNER_ID:
-        logger.warning(f"⚠️ شناسه یوزربات ({me.id}) با OWNER_ID ({OWNER_ID}) متفاوت است! (این باعث عدم شناسایی فایل‌های شما می‌شود)")
 
     bot_info = await app.bot.get_me()
     if not bot_info.username:
@@ -468,7 +604,7 @@ async def post_init(app: Application):
     session.bot_username = bot_info.username
     logger.info(f"✅ ربات @{session.bot_username} آماده است.")
 
-    await app.bot.send_message(OWNER_ID, "🤖 ربات فعال شد. /start")
+    await app.bot.send_message(OWNER_ID, "🤖 ربات فعال شد (نسخه با پشتیبانی از split). /start")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -483,7 +619,7 @@ def main():
     ))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("🚀 ربات در حال اجرا...")
+    logger.info("🚀 ربات در حال اجرا (بدون تایم‌اوت، با قابلیت split خودکار)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
