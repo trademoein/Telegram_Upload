@@ -17,7 +17,6 @@ try:
     from telethon import TelegramClient
     from telethon.sessions import MemorySession
     from telethon.crypto import AuthKey
-    # === تغییر کلیدی: نام صحیح فیلتر ===
     from telethon.tl.types import InputMessagesFilterPhotoVideo, InputMessagesFilterDocument
 except ImportError as e:
     print(f"❌ کتابخانه ناقص: {e}\nلطفاً با دستور زیر نصب کنید:\npip install python-telegram-bot PyGithub telethon")
@@ -157,21 +156,23 @@ async def download_small_file(file_id: str, name: str, bot):
     return path
 
 async def download_large_file(name: str):
-    """دریافت آخرین فایل ارسال شده توسط کاربر (عکس، ویدیو، سند و ...) با استفاده از Telethon"""
+    """
+    دریافت آخرین فایل ارسالی توسط خود کاربر (اکانت اصلی) به ربات
+    با استفاده از Telethon - بدون وابستگی به message_id
+    """
     if not session.userbot or not session.bot_username:
         raise Exception("یوزربات یا نام کاربری ربات مقداردهی نشده است.")
     path = os.path.join(session.temp_dir, name)
 
     try:
-        # === دریافت آخرین پیام حاوی عکس، ویدیو یا هر فایل دیگری (Document) ===
-        # ابتدا سعی می‌کنیم با فیلترهای ترکیبی جدیدترین را پیدا کنیم
+        # ترکیب دو فیلتر برای پشتیبانی از عکس، ویدیو و اسناد
         found_media = None
-        for f in [InputMessagesFilterPhotoVideo, InputMessagesFilterDocument]:
+        for filter_type in (InputMessagesFilterPhotoVideo, InputMessagesFilterDocument):
             async for msg in session.userbot.iter_messages(
                 session.bot_username,
-                from_user='me',        # فقط پیام‌های ارسالی خودم
-                filter=f,              # فیلتر اعمال شده (گرفته شده از مستندات رسمی)
-                limit=1                # فقط آخرین پیام
+                from_user='me',
+                filter=filter_type,
+                limit=1
             ):
                 if msg and msg.media:
                     found_media = msg
@@ -179,19 +180,19 @@ async def download_large_file(name: str):
             if found_media:
                 break
 
-        # اگر هیچ‌کدام کار نکرد، fallback به بررسی دستی آخرین پیام با استفاده از خواص message.media
+        # Fallback: اگر چیزی پیدا نشد، ۵ پیام آخر را دستی بررسی کن
         if not found_media:
             async for msg in session.userbot.iter_messages(
                 session.bot_username,
                 from_user='me',
-                limit=5                 # 5 پیام آخر را چک می‌کنیم
+                limit=5
             ):
                 if msg and msg.media:
                     found_media = msg
                     break
 
         if not found_media:
-            raise Exception("هیچ فایل رسانه‌ای از شما در چت با ربات یافت نشد.")
+            raise Exception("هیچ فایل رسانه‌ای از شما در چت با ربات یافت نشد. لطفاً ابتدا فایل را ارسال کنید.")
 
         await found_media.download_media(file=path)
         logger.info(f"✅ دانلود با یوزربات موفق: {name} ({size_str(os.path.getsize(path))})")
@@ -201,7 +202,7 @@ async def download_large_file(name: str):
         logger.error(f"❌ خطا در دانلود با یوزربات: {e}", exc_info=True)
         raise
 
-# =========================== آپلود در گیت‌هاب ===========================
+# =========================== آپلود در گیت‌هاب (با تقسیم فایل‌های بزرگ) ===========================
 def split_large_file(path: str, chunk: int = 95 * 1024 * 1024):
     size = os.path.getsize(path)
     num = math.ceil(size / chunk)
@@ -416,7 +417,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    # پاسخ به callback_query با مدیریت خطای منقضی شدن
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.warning(f"Callback answer timeout/expired: {e}")
+
     user = update.effective_user
     if user.id != OWNER_ID:
         await query.edit_message_text("⛔ دسترسی غیرمجاز.")
