@@ -116,7 +116,7 @@ async def reset_idle():
     session.idle_task = asyncio.create_task(idle_timeout())
 
 async def idle_timeout():
-    await asyncio.sleep(900)  # 15 دقیقه
+    await asyncio.sleep(1800)  # 30 دقیقه
     logger.warning("⏰ تایم‌اوت بی‌کاری - پایان نشست")
     await finish(send_message=True)
 
@@ -139,6 +139,18 @@ async def finish(send_message: bool = True):
         await session.userbot.disconnect()
         logger.info("یوزربات قطع شد.")
 
+async def ensure_userbot_connected():
+    """اطمینان از اتصال یوزربات، در صورت قطع شدن دوباره وصل می‌کند"""
+    if session.userbot is None:
+        raise Exception("یوزربات راه‌اندازی نشده است")
+    if not session.userbot.is_connected():
+        logger.warning("یوزربات قطع شده بود، دوباره وصل می‌شود...")
+        await session.userbot.connect()
+        # پس از اتصال مجدد، باید دوباره احراز هویت را بررسی کنیم
+        if not await session.userbot.is_user_authorized():
+            raise Exception("یوزربات پس از اتصال مجدد احراز هویت نشد")
+        logger.info("یوزربات مجدداً متصل شد")
+
 # ========== دانلود فایل ==========
 async def download_small_file(file_id: str, name: str, bot, progress_msg):
     path = os.path.join(session.temp_dir, name)
@@ -150,11 +162,13 @@ async def download_small_file(file_id: str, name: str, bot, progress_msg):
     return path
 
 async def download_large_file(name: str, progress_msg):
-    if not session.userbot or not session.bot_username:
-        raise Exception("یوزربات آماده نیست")
-    path = os.path.join(session.temp_dir, name)
+    await ensure_userbot_connected()
+    if not session.bot_username:
+        raise Exception("نام کاربری ربات مشخص نیست")
 
+    path = os.path.join(session.temp_dir, name)
     await progress_msg.edit_text(f"🔍 در حال جستجوی فایل {name}...")
+
     found_media = None
     for filter_type in (InputMessagesFilterPhotoVideo, InputMessagesFilterDocument):
         async for msg in session.userbot.iter_messages(
@@ -171,7 +185,6 @@ async def download_large_file(name: str, progress_msg):
     if not found_media:
         raise Exception("فایل یافت نشد")
 
-    # شروع دانلود با پیشرفت
     file_size = found_media.file.size
     last_percent = 0
 
@@ -196,7 +209,6 @@ async def upload_to_github_with_git(local_path: str, orig_name: str, caption_tex
     if session.repo_dir is None:
         session.repo_dir = os.path.join(session.temp_dir, "github_repo")
     
-    # Clone یا pull مخزن
     if not os.path.exists(session.repo_dir):
         if progress_msg:
             await progress_msg.edit_text("📥 در حال clone مخزن گیت‌هاب...")
@@ -209,7 +221,6 @@ async def upload_to_github_with_git(local_path: str, orig_name: str, caption_tex
             await progress_msg.edit_text("🔄 به‌روزرسانی مخزن محلی...")
         repo.remotes.origin.pull()
 
-    # ساختار مرتب با تاریخ
     now = datetime.now()
     date_path = now.strftime("%Y/%m/%d")
     base_name = os.path.splitext(orig_name)[0]
@@ -219,24 +230,20 @@ async def upload_to_github_with_git(local_path: str, orig_name: str, caption_tex
     folder_in_repo = os.path.join(session.repo_dir, "uploads", date_path, final_folder_name)
     os.makedirs(folder_in_repo, exist_ok=True)
 
-    # کپی فایل اصلی
     dest_file = os.path.join(folder_in_repo, orig_name)
     shutil.copy2(local_path, dest_file)
 
-    # کپی کپشن
     if caption_text.strip():
         cap_path = os.path.join(folder_in_repo, f"{orig_name}.caption.txt")
         with open(cap_path, "w", encoding="utf-8") as cp:
             cp.write(caption_text)
 
-    # Commit و Push
     if progress_msg:
         await progress_msg.edit_text(f"📤 در حال commit و push...")
     repo.index.add("*")
     commit_msg = f"Add {orig_name} at {now.strftime('%Y-%m-%d %H:%M:%S')}"
     repo.index.commit(commit_msg)
     
-    # تلاش مجدد برای push
     for attempt in range(3):
         try:
             repo.remotes.origin.push()
@@ -271,7 +278,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📂 ساختار ذخیره‌سازی: `uploads/سال/ماه/روز/نام فایل_زمان/`\n"
         "🔹 فایل‌های >۲۰MB با یوزربات دانلود می‌شوند.\n"
         "🔹 آپلود با Git (پایدار و بدون خطای 500)\n"
-        "🔹 برای دانلود فایل‌ها، کل مخزن را به صورت ZIP از گیت‌هاب دریافت کنید.\n\n"
+        "🔹 برای دانلود فایل‌ها، کل مخزن را به صورت ZIP از گیت‌هاب دریافت کنید.\n"
+        "🔹 مدت بی‌کاری: ۳۰ دقیقه\n\n"
         "_فقط شما مجاز هستید._",
         parse_mode="Markdown"
     )
@@ -438,7 +446,7 @@ async def post_init(app: Application):
     me = await userbot.get_me()
     logger.info(f"✅ یوزربات متصل: {me.first_name} (@{me.username}) ID: {me.id}")
     if me.id != OWNER_ID:
-        logger.warning(f"⚠️ شناسه یوزربات ({me.id}) با OWNER_ID ({OWNER_ID}) متفاوت است!")
+        logger.warning(f"⚠️ شناسه یوزربات ({me.id}) با OWNER_ID ({OWNER_ID}) متفاوت است! (این باعث عدم شناسایی فایل‌های شما می‌شود)")
 
     bot_info = await app.bot.get_me()
     if not bot_info.username:
