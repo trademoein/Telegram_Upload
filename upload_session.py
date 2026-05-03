@@ -74,6 +74,7 @@ class Session:
         self.idle_task = None
         self.app = None
         self.userbot = None
+        self.bot_entity = None   # entity ربات در Telethon
 
 session = Session()
 
@@ -115,16 +116,15 @@ async def download_small_file(file_id, name, bot):
     return path
 
 async def download_large_file(name):
-    if not session.userbot:
-        raise Exception("Userbot client not initialized")
+    if not session.userbot or not session.bot_entity:
+        raise Exception("Userbot or bot entity not initialized")
     path = os.path.join(session.temp_dir, name)
 
-    # گرفتن اطلاعات self (خود userbot) برای کش کردن entity
-    me = await session.userbot.get_me()
-    # حالا می‌توانیم پیام‌ها را از چت خود userbot (که همان مالک است) دریافت کنیم
-    message = await session.userbot.get_messages(me, ids=session.last_message_id)
-    if not message:
-        raise Exception("Message not found via userbot")
+    # دریافت آخرین پیام از چت بین userbot و ربات (که همان فایل ارسالی است)
+    messages = await session.userbot.get_messages(session.bot_entity, limit=1)
+    if not messages or not messages[0].media:
+        raise Exception("No recent media message found via userbot")
+    message = messages[0]
     await message.download_media(file=path)
     logger.info(f"Userbot downloaded: {name} ({os.path.getsize(path)} B)")
     return path
@@ -422,7 +422,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("All cleared")
 
 async def post_init(app: Application):
-    # ساخت اتصال userbot با MemorySession
+    # اتصال userbot
     mem = MemorySession()
     mem.set_dc(DC_ID, '149.154.175.59', 443)
     mem.auth_key = AuthKey(data=bytes.fromhex(AUTH_KEY_HEX))
@@ -432,9 +432,12 @@ async def post_init(app: Application):
     await userbot.connect()
     session.userbot = userbot
 
-    logger.info("✅ Telethon userbot started")
+    # دریافت اطلاعات ربات و ذخیره entity آن
+    bot_info = await app.bot.get_me()
+    bot_username = bot_info.username
+    session.bot_entity = await userbot.get_entity(f'@{bot_username}')
+    logger.info("✅ Telethon userbot started, bot entity cached")
 
-    # ارسال پیام شروع
     await app.bot.send_message(OWNER_ID, "🤖 Bot is active. Send me files or use /start")
 
 def main():
